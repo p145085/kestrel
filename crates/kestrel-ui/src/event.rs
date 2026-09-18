@@ -170,6 +170,14 @@ pub enum AppEvent {
         /// A call is in progress.
         active: bool,
     },
+    /// Who is in a call, and what each is allowed.
+    ///
+    /// Sent whenever it changes, so the menu offering to deafen somebody is
+    /// offering it about people who are actually there.
+    CallPeers {
+        /// Each peer, the conversation they are in, and their permissions.
+        peers: Vec<kestrel_client::PeerControl>,
+    },
     /// A peer's video needs somewhere to be drawn.
     ///
     /// The interface answers with [`UiCommand::VideoSink`]. It is asked rather
@@ -228,6 +236,20 @@ pub enum UiCommand {
     },
     /// Do something with a call.
     Call(CallAction),
+    /// Decide whether a peer may see our video.
+    AllowVideo {
+        /// Who.
+        peer: String,
+        /// Whether they may.
+        allowed: bool,
+    },
+    /// Decide whether we are listening to a peer.
+    Deafen {
+        /// Who.
+        peer: String,
+        /// Whether to stop listening.
+        deafened: bool,
+    },
     /// Choose what a conversation captures from.
     Devices {
         /// Which conversation.

@@ -131,6 +131,8 @@ struct State {
     calls: Calls,
     /// What was last reported to the interface, so it is told only on change.
     reported: (bool, bool),
+    /// The same, for who is in a call and what they are allowed.
+    reported_peers: Vec<kestrel_client::PeerControl>,
     /// Whether the server sends our own messages back to us.
     ///
     /// Decides whether saying something should also be shown locally. Getting
@@ -145,6 +147,7 @@ impl State {
             translator: Translator::new(),
             calls: Calls::new(media_tx),
             reported: (false, false),
+            reported_peers: Vec::new(),
             echoed: false,
         }
     }
@@ -181,6 +184,12 @@ impl State {
         }
         for (peer, target) in self.calls.take_video_wanted() {
             let _ = events.send(AppEvent::VideoWanted { peer, target }).await;
+        }
+
+        let peers = self.calls.peer_controls();
+        if peers != self.reported_peers {
+            self.reported_peers.clone_from(&peers);
+            let _ = events.send(AppEvent::CallPeers { peers }).await;
         }
 
         let now = (self.calls.is_ringing(), self.calls.in_call());
@@ -285,6 +294,16 @@ impl State {
                 if let Err(error) = done {
                     show(events, Line::error(error.to_string())).await;
                 }
+                self.flush(events).await;
+                None
+            }
+            UiCommand::AllowVideo { peer, allowed } => {
+                self.calls.set_video_allowed(&peer, allowed);
+                self.flush(events).await;
+                None
+            }
+            UiCommand::Deafen { peer, deafened } => {
+                self.calls.set_deafened(&peer, deafened);
                 self.flush(events).await;
                 None
             }

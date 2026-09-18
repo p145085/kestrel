@@ -21,6 +21,18 @@ use tokio::sync::mpsc;
 /// What the server buffer is called in the sidebar, since its id is empty.
 const SERVER_LABEL: &str = "server";
 
+/// One picture on screen, and where it belongs.
+struct Picture {
+    /// The conversation whose call it belongs to.
+    target: BufferId,
+    /// Whose it is; our own is named `you`.
+    peer: String,
+    /// The box holding the picture and its label.
+    widget: gtk::Box,
+    /// Its own window, when it has been floated out of the strip.
+    floating: Option<gtk::Window>,
+}
+
 /// One conversation's worth of state.
 struct Buffer {
     text: gtk::TextBuffer,
@@ -50,7 +62,9 @@ struct State {
     ///
     /// A call in a private conversation has no business covering a channel
     /// somebody switched to in order to read it.
-    pictures: Vec<(BufferId, gtk::Widget)>,
+    pictures: Vec<Picture>,
+    /// Who is in a call, and what each is allowed.
+    peers: Vec<kestrel_client::PeerControl>,
     /// Somebody is ringing.
     ringing: bool,
     /// A call is in progress.
@@ -65,6 +79,11 @@ pub struct Window {
     topic: gtk::Label,
     /// Where a call's video is drawn.
     videos: gtk::Box,
+    /// The part of the Call menu listing who is in it.
+    ///
+    /// Held rather than rebuilt into the bar, because a menu model shown by
+    /// the menu bar updates in place when its contents change.
+    peer_menu: gio::Menu,
     sidebar: gtk::ListBox,
     members: gtk::ListBox,
     members_pane: gtk::Widget,
@@ -89,6 +108,7 @@ impl Window {
     ) -> (Self, gtk::ApplicationWindow) {
         let tags = gtk::TextTagTable::new();
         add_tags(&tags);
+        let peer_menu = gio::Menu::new();
 
         let view = gtk::TextView::builder()
             .editable(false)
@@ -198,7 +218,9 @@ impl Window {
             .build();
 
         let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        outer.append(&gtk::PopoverMenuBar::from_model(Some(&menu_model())));
+        outer.append(&gtk::PopoverMenuBar::from_model(Some(&menu_model(
+            &peer_menu,
+        ))));
         outer.append(&row);
 
         let window = gtk::ApplicationWindow::builder()
@@ -214,6 +236,7 @@ impl Window {
             entry,
             topic,
             videos,
+            peer_menu,
             sidebar,
             members,
             members_pane: members_pane.upcast(),
@@ -228,6 +251,7 @@ impl Window {
                 last: None,
                 call_options: CallOptions::default(),
                 pictures: Vec::new(),
+                peers: Vec::new(),
                 ringing: false,
                 in_call: false,
             })),
@@ -238,6 +262,7 @@ impl Window {
         // The server buffer always exists: it is where anything that belongs
         // to no conversation goes, including the reason a connection failed.
         ui.install_actions(app, &window);
+        ui.rebuild_peer_menu();
         ui.ensure_buffer(SERVER_BUFFER);
         ui.show_buffer(SERVER_BUFFER);
         ui.connect_signals();
@@ -355,6 +380,10 @@ impl Window {
                 }
                 self.update_actions();
             }
+            AppEvent::CallPeers { peers } => {
+                self.state.borrow_mut().peers = peers;
+                self.rebuild_peer_menu();
+            }
             AppEvent::SelfViewWanted { target } => self.show_video("you", &target),
             AppEvent::VideoWanted { peer, target } => self.show_video(&peer, &target),
             AppEvent::Disconnected { reason } => {
@@ -445,7 +474,7 @@ impl Window {
 
         self.rebuild_sidebar();
         self.redraw_members();
-        self.redraw_video();
+        self.relayout_video();
         self.redraw_topic();
         self.retitle();
         self.update_actions();
@@ -782,6 +811,24 @@ impl Window {
         }
 
         self.add_action(window, "devices", Self::choose_devices);
+
+        // Floating a picture out and putting it back, each carrying whose.
+        for name in ["float-video", "attach-video"] {
+            let action = gio::SimpleAction::new(name, Some(glib::VariantTy::STRING));
+            let ui = self.clone();
+            let which = name;
+            action.connect_activate(move |_, parameter| {
+                let Some(peer) = parameter.and_then(glib::Variant::str) else {
+                    return;
+                };
+                if which == "float-video" {
+                    ui.float_picture(peer);
+                } else {
+                    ui.attach_picture(peer);
+                }
+            });
+            window.add_action(&action);
+        }
         self.add_action(window, "next-buffer", |ui| ui.cycle_buffer(1));
         self.add_action(window, "previous-buffer", |ui| ui.cycle_buffer(-1));
 
@@ -1056,6 +1103,21 @@ impl Window {
             .build();
 
         let labelled = gtk::Box::new(gtk::Orientation::Vertical, 2);
+
+        // A picture worth watching closely is worth having its own window, and
+        // one that is in the way is worth putting back.
+        let menu = gtk::PopoverMenu::from_model(Some(&picture_menu(peer)));
+        menu.set_parent(&labelled);
+        menu.set_has_arrow(false);
+        let click = gtk::GestureClick::new();
+        click.set_button(gdk::BUTTON_SECONDARY);
+        let showing = menu.clone();
+        click.connect_pressed(move |_, _, x, y| {
+            showing.set_pointing_to(Some(&gdk::Rectangle::new(at(x), at(y), 1, 1)));
+            showing.popup();
+        });
+        labelled.add_controller(click);
+        unparent_with(&labelled, &menu);
         if peer == "you" {
             // Placed first, and given less room to begin with, so it reads as
             // a corner of the call rather than another participant -- but the
@@ -1070,12 +1132,13 @@ impl Window {
                 .build(),
         );
 
-        self.add_picture(&labelled, peer == "you");
-        self.state
-            .borrow_mut()
-            .pictures
-            .push((target.to_owned(), labelled.clone().upcast()));
-        self.redraw_video();
+        self.state.borrow_mut().pictures.push(Picture {
+            target: target.to_owned(),
+            peer: peer.to_owned(),
+            widget: labelled.clone(),
+            floating: None,
+        });
+        self.relayout_video();
 
         // "you" is not a nickname anybody can have, so it cannot collide
         // with a peer of that name.
@@ -1090,55 +1153,152 @@ impl Window {
         let _ = self.commands.borrow().send(command);
     }
 
-    /// Put a picture in the strip, divided from whatever is already there.
+    /// Rebuild the strip from the pictures that belong in it.
     ///
-    /// Chained rather than laid out side by side, so every picture has a
-    /// handle between it and its neighbour. The whole strip is emptied at the
-    /// end of a call, so the chain never has to be unpicked.
-    fn add_picture(&self, picture: &gtk::Box, mine: bool) {
-        let Some(existing) = self.videos.first_child() else {
-            self.videos.append(picture);
-            return;
+    /// Rebuilt rather than adjusted, because a picture can be added, floated
+    /// out, put back or thrown away, and unpicking a chain of dividers for
+    /// each of those is where the bugs would live.
+    fn relayout_video(&self) {
+        while let Some(child) = self.videos.first_child() {
+            self.videos.remove(&child);
+        }
+
+        let attached: Vec<gtk::Box> = {
+            let state = self.state.borrow();
+            state
+                .pictures
+                .iter()
+                .filter(|picture| picture.floating.is_none() && picture.target == state.current)
+                .map(|picture| picture.widget.clone())
+                .collect()
         };
 
-        self.videos.remove(&existing);
-        let (start, end): (&gtk::Widget, &gtk::Widget) = if mine {
-            (picture.upcast_ref(), &existing)
-        } else {
-            (&existing, picture.upcast_ref())
-        };
+        // Chained through dividers so every picture has a handle beside it; a
+        // box would split them evenly and give no say in the matter.
+        let mut built: Option<gtk::Widget> = None;
+        for widget in attached {
+            built = Some(match built {
+                None => widget.upcast(),
+                Some(existing) => {
+                    let divided = gtk::Paned::builder()
+                        .orientation(gtk::Orientation::Horizontal)
+                        .start_child(&existing)
+                        .end_child(&widget)
+                        .resize_start_child(true)
+                        .resize_end_child(true)
+                        .build();
+                    divided.set_position(240);
+                    divided.upcast()
+                }
+            });
+        }
 
-        let divided = gtk::Paned::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .start_child(start)
-            .end_child(end)
-            .resize_start_child(true)
-            .resize_end_child(true)
+        match built {
+            Some(widget) => {
+                self.videos.append(&widget);
+                self.videos.set_visible(true);
+            }
+            None => self.videos.set_visible(false),
+        }
+    }
+
+    /// Give a picture a window of its own.
+    fn float_picture(&self, peer: &str) {
+        let Some(parent) = self.window() else { return };
+
+        let widget = {
+            let state = self.state.borrow();
+            state
+                .pictures
+                .iter()
+                .find(|picture| picture.peer == peer && picture.floating.is_none())
+                .map(|picture| picture.widget.clone())
+        };
+        let Some(widget) = widget else { return };
+
+        // Taken out of the strip before it goes anywhere else: a widget has
+        // one parent, and leaving it in two places is a crash rather than a
+        // layout problem.
+        self.relayout_video_without(&widget);
+
+        let floating = gtk::Window::builder()
+            .transient_for(&parent)
+            .title(if peer == "you" { "You" } else { peer })
+            .default_width(480)
+            .default_height(360)
+            .child(&widget)
             .build();
-        // Your own picture is the smaller of the two until you say otherwise.
-        divided.set_position(if mine { 200 } else { 360 });
-        self.videos.append(&divided);
+
+        // Closing the window puts the picture back rather than losing it.
+        let ui = self.clone();
+        let who = peer.to_owned();
+        floating.connect_close_request(move |window| {
+            window.set_child(None::<&gtk::Widget>);
+            ui.attach_picture(&who);
+            glib::Propagation::Proceed
+        });
+
+        if let Some(picture) = self
+            .state
+            .borrow_mut()
+            .pictures
+            .iter_mut()
+            .find(|picture| picture.peer == peer)
+        {
+            picture.floating = Some(floating.clone());
+        }
+        floating.present();
+    }
+
+    /// Put a floated picture back in the strip.
+    fn attach_picture(&self, peer: &str) {
+        let window = self
+            .state
+            .borrow_mut()
+            .pictures
+            .iter_mut()
+            .find(|picture| picture.peer == peer)
+            .and_then(|picture| picture.floating.take());
+        if let Some(window) = window {
+            window.set_child(None::<&gtk::Widget>);
+            window.close();
+        }
+        self.relayout_video();
+    }
+
+    /// Lay the strip out again, leaving one widget out of it.
+    fn relayout_video_without(&self, widget: &gtk::Box) {
+        if let Some(parent) = widget.parent() {
+            if let Some(paned) = parent.downcast_ref::<gtk::Paned>() {
+                if paned.start_child().as_ref() == Some(widget.upcast_ref()) {
+                    paned.set_start_child(None::<&gtk::Widget>);
+                } else {
+                    paned.set_end_child(None::<&gtk::Widget>);
+                }
+            } else if let Some(container) = parent.downcast_ref::<gtk::Box>() {
+                container.remove(widget);
+            }
+        }
+        self.relayout_video();
     }
 
     /// Take the video away when there is no longer a call.
     fn clear_video(&self) {
-        while let Some(child) = self.videos.first_child() {
-            self.videos.remove(&child);
+        let floating: Vec<gtk::Window> = {
+            let mut state = self.state.borrow_mut();
+            let windows = state
+                .pictures
+                .iter_mut()
+                .filter_map(|picture| picture.floating.take())
+                .collect();
+            state.pictures.clear();
+            windows
+        };
+        for window in floating {
+            window.set_child(None::<&gtk::Widget>);
+            window.close();
         }
-        self.state.borrow_mut().pictures.clear();
-        self.videos.set_visible(false);
-    }
-
-    /// Show only the pictures belonging to the conversation on screen.
-    fn redraw_video(&self) {
-        let state = self.state.borrow();
-        let mut any = false;
-        for (target, widget) in &state.pictures {
-            let mine = target == &state.current;
-            widget.set_visible(mine);
-            any |= mine;
-        }
-        self.videos.set_visible(any);
+        self.relayout_video();
     }
 
     /// Choose what this conversation captures from.
@@ -1247,6 +1407,68 @@ impl Window {
         let closing = dialog.clone();
         cancel.connect_clicked(move |_| closing.close());
         dialog.present();
+    }
+
+    /// Offer a toggle per person in the call.
+    ///
+    /// Rebuilt from scratch each time, because the actions carry state and a
+    /// stale one would offer to deafen somebody who has already left. Named by
+    /// position rather than nickname: an action name may only contain a
+    /// narrow set of characters, and a nickname may contain many others.
+    fn rebuild_peer_menu(&self) {
+        let Some(window) = self.window() else { return };
+        let peers = self.state.borrow().peers.clone();
+
+        let menu = gio::Menu::new();
+        for (index, control) in peers.iter().enumerate() {
+            let person = gio::Menu::new();
+            person.append(Some("Hear them"), Some(&format!("win.hear-{index}")));
+            person.append(
+                Some("Let them see your video"),
+                Some(&format!("win.show-{index}")),
+            );
+            menu.append_submenu(Some(&control.peer), &person);
+
+            let hearing = gio::SimpleAction::new_stateful(
+                &format!("hear-{index}"),
+                None,
+                &control.permissions.hearing_audio.to_variant(),
+            );
+            let ui = self.clone();
+            let who = control.peer.clone();
+            hearing.connect_activate(move |action, _| {
+                let now = !action.state().and_then(|s| s.get::<bool>()).unwrap_or(true);
+                action.set_state(&now.to_variant());
+                let _ = ui.commands.borrow().send(UiCommand::Deafen {
+                    peer: who.clone(),
+                    deafened: !now,
+                });
+            });
+            window.add_action(&hearing);
+
+            let seeing = gio::SimpleAction::new_stateful(
+                &format!("show-{index}"),
+                None,
+                &control.permissions.may_see_video.to_variant(),
+            );
+            let ui = self.clone();
+            let who = control.peer.clone();
+            seeing.connect_activate(move |action, _| {
+                let now = !action.state().and_then(|s| s.get::<bool>()).unwrap_or(true);
+                action.set_state(&now.to_variant());
+                let _ = ui.commands.borrow().send(UiCommand::AllowVideo {
+                    peer: who.clone(),
+                    allowed: now,
+                });
+            });
+            window.add_action(&seeing);
+        }
+
+        if peers.is_empty() {
+            menu.append(Some("Nobody is in a call"), None);
+        }
+        self.peer_menu.remove_all();
+        self.peer_menu.append_submenu(Some("Related users"), &menu);
     }
 
     /// Ask the connection to do something with a call.
@@ -1417,6 +1639,20 @@ fn at(value: f64) -> i32 {
     }
 }
 
+/// What a right click on a picture offers.
+fn picture_menu(peer: &str) -> gio::Menu {
+    let menu = gio::Menu::new();
+    menu.append(
+        Some("Float into its own window"),
+        Some(&format!("win.float-video::{peer}")),
+    );
+    menu.append(
+        Some("Attach to the conversation"),
+        Some(&format!("win.attach-video::{peer}")),
+    );
+    menu
+}
+
 /// What a right click on a buffer in the list offers.
 ///
 /// A server buffer is the connection itself, so the only thing to do with it
@@ -1457,7 +1693,7 @@ fn member_menu(nick: &str) -> gio::Menu {
 ///
 /// A menu rather than only slash commands: the commands are faster once known,
 /// but nothing in a text box tells a new user that any of this exists.
-fn menu_model() -> gio::Menu {
+fn menu_model(peers: &gio::Menu) -> gio::Menu {
     let server = gio::Menu::new();
     server.append(Some("New Connection…"), Some("win.connect"));
     server.append(Some("Reconnect"), Some("win.reconnect"));
@@ -1478,6 +1714,8 @@ fn menu_model() -> gio::Menu {
     call.append(Some("Reject"), Some("win.reject"));
     call.append(Some("Confirm Spoken Phrase"), Some("win.verify"));
     call.append(Some("Hang Up"), Some("win.hangup"));
+    // A live section: who is in the call changes while the menu exists.
+    call.append_section(None, peers);
 
     let buffers = gio::Menu::new();
     buffers.append(Some("Next"), Some("win.next-buffer"));
@@ -1584,7 +1822,7 @@ mod tests {
     #[test]
     fn every_menu_entry_points_at_an_action_that_exists() {
         let mut found = Vec::new();
-        referenced(menu_model().upcast_ref(), &mut found);
+        referenced(menu_model(&gio::Menu::new()).upcast_ref(), &mut found);
 
         assert!(!found.is_empty(), "the menu model produced nothing");
         for action in &found {
@@ -1603,7 +1841,7 @@ mod tests {
         // The other direction: an action nobody can invoke is dead code that
         // looks like a feature.
         let mut found = Vec::new();
-        referenced(menu_model().upcast_ref(), &mut found);
+        referenced(menu_model(&gio::Menu::new()).upcast_ref(), &mut found);
 
         for name in ACTIONS {
             assert!(

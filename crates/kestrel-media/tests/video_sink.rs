@@ -220,3 +220,82 @@ async fn a_sink_offered_once_video_is_flowing_replaces_what_was_there() {
     alice.close();
     bob.close();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn video_can_be_shut_off_without_disturbing_the_call() {
+    // Denying somebody your picture must not renegotiate or drop the call:
+    // the far end keeps its side and simply stops receiving frames.
+    kestrel_media::init().expect("GStreamer should initialise");
+    let sending = Sending::audio_video();
+
+    let (alice, mut alice_events) =
+        PeerConnection::new("alice", sending, &Source::Test, None).unwrap();
+    let (bob, mut bob_events) = PeerConnection::new("bob", sending, &Source::Test, None).unwrap();
+
+    let (sink, frames) = counting_sink();
+    bob.set_video_sink(sink).expect("a sink should be accepted");
+
+    let mut state = (false, false);
+    let mut errors = Vec::new();
+    let settled = tokio::time::Instant::now() + Duration::from_secs(20);
+    pump(
+        &alice,
+        &bob,
+        &mut alice_events,
+        &mut bob_events,
+        settled,
+        &mut state,
+        &mut errors,
+    )
+    .await;
+    assert!(state.0 && state.1, "the peers did not connect");
+    assert!(
+        frames.load(Ordering::Relaxed) > 0,
+        "bob was not receiving alice's video to begin with"
+    );
+
+    alice.set_sending_video(false);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let before = frames.load(Ordering::Relaxed);
+    let quiet = tokio::time::Instant::now() + Duration::from_secs(4);
+    pump(
+        &alice,
+        &bob,
+        &mut alice_events,
+        &mut bob_events,
+        quiet,
+        &mut state,
+        &mut errors,
+    )
+    .await;
+    let after = frames.load(Ordering::Relaxed);
+
+    assert_eq!(before, after, "frames kept arriving after the valve closed");
+    assert!(errors.is_empty(), "the call was disturbed: {errors:#?}");
+    assert!(
+        state.0 && state.1,
+        "the call dropped rather than went quiet"
+    );
+
+    // And it can be opened again.
+    alice.set_sending_video(true);
+    let again = tokio::time::Instant::now() + Duration::from_secs(6);
+    pump(
+        &alice,
+        &bob,
+        &mut alice_events,
+        &mut bob_events,
+        again,
+        &mut state,
+        &mut errors,
+    )
+    .await;
+    assert!(
+        frames.load(Ordering::Relaxed) > after,
+        "video did not come back"
+    );
+
+    alice.close();
+    bob.close();
+}

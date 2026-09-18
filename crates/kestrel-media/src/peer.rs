@@ -282,6 +282,13 @@ pub struct Devices {
     pub microphone: Option<String>,
 }
 
+/// An element held so it can be adjusted while the call runs.
+///
+/// Both controls have to exist before there is anything to control: adding a
+/// valve or a volume to a pipeline that is already carrying media is delicate,
+/// and doing it at the moment somebody clicks a menu is the worst time.
+type Control = Arc<Mutex<Option<gst::Element>>>;
+
 /// One connection to one peer.
 pub struct PeerConnection {
     pipeline: gst::Pipeline,
@@ -295,6 +302,10 @@ pub struct PeerConnection {
     self_view: VideoSlot,
     /// What was actually opened, as the system names it.
     devices: Devices,
+    /// Shuts off the video we send to this peer.
+    video_gate: Control,
+    /// Silences the audio we receive from this peer.
+    audio_gate: Control,
     /// When the pipeline started playing.
     opened: std::time::Instant,
 }
@@ -339,15 +350,17 @@ impl PeerConnection {
             microphone = add_audio(&pipeline, &webrtc, source)?;
         }
         let self_view = VideoSlot::default();
+        let video_gate: Control = Arc::new(Mutex::new(None));
+        let audio_gate: Control = Arc::new(Mutex::new(None));
         let mut camera = None;
         if sending.video {
-            camera = add_video(&pipeline, &webrtc, source, &self_view)?;
+            camera = add_video(&pipeline, &webrtc, source, &self_view, &video_gate)?;
         }
 
         let (events, receiver) = mpsc::unbounded_channel();
         let gate: Gate = Arc::new(Mutex::new(true));
         let video = VideoSlot::default();
-        connect_signals(&webrtc, &events, &gate, &video);
+        connect_signals(&webrtc, &events, &gate, &video, &audio_gate);
         watch_bus(&pipeline, &events);
 
         pipeline
@@ -363,6 +376,8 @@ impl PeerConnection {
                 video,
                 self_view,
                 devices: Devices { camera, microphone },
+                video_gate,
+                audio_gate,
                 opened: std::time::Instant::now(),
             },
             receiver,
@@ -432,6 +447,31 @@ impl PeerConnection {
     /// camera away from it.
     pub fn set_self_view_sink(&self, sink: gst::Element) -> Result<(), MediaError> {
         self.replace_in(&self.self_view, sink)
+    }
+
+    /// Whether to send this peer any video.
+    ///
+    /// Shut off at the valve rather than by renegotiating: the far end keeps
+    /// its side of the call and simply stops receiving pictures, which is what
+    /// "you may not see me" should look like from both ends.
+    pub fn set_sending_video(&self, sending: bool) {
+        if let Ok(gate) = self.video_gate.lock()
+            && let Some(valve) = gate.as_ref()
+        {
+            valve.set_property("drop", !sending);
+        }
+    }
+
+    /// Whether to play the audio this peer sends.
+    ///
+    /// Silenced here rather than by asking them to stop: what you listen to is
+    /// your business and needs nobody's cooperation.
+    pub fn set_hearing_audio(&self, hearing: bool) {
+        if let Ok(gate) = self.audio_gate.lock()
+            && let Some(volume) = gate.as_ref()
+        {
+            volume.set_property("mute", !hearing);
+        }
     }
 
     /// What this connection actually captures from.
@@ -611,6 +651,7 @@ fn connect_signals(
     events: &mpsc::UnboundedSender<PeerEvent>,
     gate: &Gate,
     video: &VideoSlot,
+    audio_gate: &Control,
 ) {
     let tx = events.clone();
     webrtc.connect("on-negotiation-needed", false, move |_| {
@@ -649,6 +690,7 @@ fn connect_signals(
     let tx = events.clone();
     let gate = Arc::clone(gate);
     let video = video.clone();
+    let audio_gate = audio_gate.clone();
     webrtc.connect_pad_added(move |element, pad| {
         guarded("an incoming stream", (), || {
             if pad.direction() != gst::PadDirection::Src {
@@ -666,7 +708,7 @@ fn connect_signals(
             else {
                 return;
             };
-            if let Err(error) = attach_receiver(&pipeline, pad, &tx, &gate, &video) {
+            if let Err(error) = attach_receiver(&pipeline, pad, &tx, &gate, &video, &audio_gate) {
                 let _ = tx.send(PeerEvent::Error(error.to_string()));
             }
         });
@@ -684,6 +726,7 @@ fn attach_receiver(
     events: &mpsc::UnboundedSender<PeerEvent>,
     gate: &Gate,
     video: &VideoSlot,
+    audio_gate: &Control,
 ) -> Result<(), MediaError> {
     // Plain `decodebin`, deliberately. The pad carries `application/x-rtp`,
     // and `decodebin3` does not autoplug RTP depayloaders: it accepts the
@@ -700,6 +743,7 @@ fn attach_receiver(
     // possibly after the owner has closed the connection.
     let gate = Arc::clone(gate);
     let video = video.clone();
+    let audio_gate = audio_gate.clone();
     decode.connect_pad_added(move |_, pad| {
         guarded("a decoded stream", (), || {
             let Ok(open) = gate.lock() else {
@@ -720,6 +764,8 @@ fn attach_receiver(
                 Ok(chain) => {
                     if is_video {
                         video.now_live(chain.convert, chain.sink);
+                    } else if let Ok(mut held) = audio_gate.lock() {
+                        (*held).clone_from(&chain.volume);
                     }
                     let linked = chain
                         .head
@@ -769,6 +815,8 @@ struct Chain {
     convert: gst::Element,
     /// Where it ends up.
     sink: gst::Element,
+    /// For audio, what can silence it without asking the sender to stop.
+    volume: Option<gst::Element>,
 }
 
 /// Build the chain that consumes one decoded stream.
@@ -796,6 +844,13 @@ fn build_receive_chain(
     } else {
         Some(make("audioresample")?)
     };
+    // Deafening somebody is a decision about what you listen to, so it belongs
+    // on the receiving side and needs nobody's cooperation.
+    let volume = if is_video {
+        None
+    } else {
+        Some(make("volume")?)
+    };
 
     let sink = match wanted {
         Some(sink) => sink,
@@ -819,6 +874,9 @@ fn build_receive_chain(
     if let Some(resample) = &resample {
         elements.push(resample);
     }
+    if let Some(volume) = &volume {
+        elements.push(volume);
+    }
     elements.push(&sink);
 
     pipeline
@@ -835,8 +893,9 @@ fn build_receive_chain(
     Ok(Chain {
         head: queue,
         // The cut point for a later sink swap is whatever feeds it.
-        convert: resample.unwrap_or(convert),
+        convert: volume.clone().or(resample).unwrap_or(convert),
         sink,
+        volume,
     })
 }
 
@@ -1099,6 +1158,7 @@ fn add_video(
     webrtc: &gst::Element,
     source: &Source,
     self_view: &VideoSlot,
+    gate: &Control,
 ) -> Result<Option<String>, MediaError> {
     let mut opened = None;
     let src = match source {
@@ -1178,8 +1238,16 @@ fn add_video(
     // once, and a preview that opened it again would take it from the call.
     let tee = make("tee")?;
 
+    // Between the tee and the encoder, so shutting it off stops the pictures
+    // reaching this peer while the preview carries on showing what the camera
+    // sees. Nothing is renegotiated, so the call is undisturbed.
+    let valve = make("valve")?;
+    if let Ok(mut held) = gate.lock() {
+        *held = Some(valve.clone());
+    }
+
     let head = [&src, &raw, &convert, &scale, &size, &tee];
-    let encoding = [&queue, &encode, &pay];
+    let encoding = [&valve, &queue, &encode, &pay];
     pipeline
         .add_many(head)
         .map_err(|_| MediaError::Pipeline("could not add the video chain".into()))?;
@@ -1191,7 +1259,7 @@ fn add_video(
     gst::Element::link_many(encoding)
         .map_err(|_| MediaError::Pipeline("could not link the encoder".into()))?;
 
-    link_tee(&tee, &queue)?;
+    link_tee(&tee, &valve)?;
     pay.link(webrtc)
         .map_err(|_| MediaError::Pipeline("could not link video to webrtcbin".into()))?;
 

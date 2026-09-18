@@ -22,6 +22,36 @@ use tokio::sync::mpsc;
 use crate::notice::{Level, Notice};
 use crate::store::Store;
 
+/// What one peer is allowed, and what we are willing to hear from them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Permissions {
+    /// Whether they may see our video.
+    pub may_see_video: bool,
+    /// Whether we are listening to them.
+    pub hearing_audio: bool,
+}
+
+impl Default for Permissions {
+    /// Everything on, because a call nobody can see or hear is not a call.
+    fn default() -> Self {
+        Self {
+            may_see_video: true,
+            hearing_audio: true,
+        }
+    }
+}
+
+/// One peer in a call, and what is currently allowed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerControl {
+    /// Their nickname.
+    pub peer: String,
+    /// The conversation the call is in.
+    pub target: String,
+    /// What is allowed.
+    pub permissions: Permissions,
+}
+
 /// How a conversation is keyed when remembering something about it.
 ///
 /// Nicknames and channel names are case-insensitive on IRC, so `Emila` and
@@ -82,6 +112,12 @@ pub struct Calls {
     self_view_wanted: Option<String>,
     /// Where our identity and pinned keys are kept, if anywhere.
     store: Option<Store>,
+    /// Who may see us, and who we are listening to.
+    ///
+    /// Kept per peer rather than per call, because a decision about a person
+    /// is about that person: somebody muted in one conversation is not
+    /// somebody you want to hear the moment they appear in another.
+    permissions: HashMap<String, Permissions>,
     /// Devices chosen for particular conversations.
     ///
     /// One camera for a friend and another for a channel is a reasonable
@@ -144,6 +180,7 @@ impl Calls {
                 microphone: None,
             },
             per_target: HashMap::new(),
+            permissions: HashMap::new(),
             media: MediaWanted::audio_video(),
             active: HashMap::new(),
             connections: HashMap::new(),
@@ -304,6 +341,79 @@ impl Calls {
     fn target_of_peer(&self, peer: &str) -> Option<String> {
         let call_id = self.call_of(peer)?;
         self.active.get(&call_id).map(|entry| entry.target.clone())
+    }
+
+    /// Everybody currently in a call, and what each is allowed.
+    #[must_use]
+    pub fn peer_controls(&self) -> Vec<PeerControl> {
+        let mut controls: Vec<PeerControl> = self
+            .connections
+            .keys()
+            .map(|(call_id, peer)| PeerControl {
+                peer: peer.clone(),
+                target: self
+                    .active
+                    .get(call_id)
+                    .map(|entry| entry.target.clone())
+                    .unwrap_or_default(),
+                permissions: self.permissions_for(peer),
+            })
+            .collect();
+        // A stable order, so a menu does not reshuffle itself under the
+        // pointer every time anything else changes.
+        controls.sort_by(|a, b| a.peer.cmp(&b.peer));
+        controls
+    }
+
+    /// What a peer is currently allowed.
+    #[must_use]
+    pub fn permissions_for(&self, peer: &str) -> Permissions {
+        self.permissions
+            .get(&conversation_key(peer))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Decide whether a peer may see our video.
+    pub fn set_video_allowed(&mut self, peer: &str, allowed: bool) {
+        let mut permissions = self.permissions_for(peer);
+        permissions.may_see_video = allowed;
+        self.permissions.insert(conversation_key(peer), permissions);
+
+        for ((_, who), connection) in &self.connections {
+            if conversation_key(who) == conversation_key(peer) {
+                connection.set_sending_video(allowed);
+            }
+        }
+        self.say_about(
+            peer,
+            if allowed {
+                format!("{peer} can see your video")
+            } else {
+                format!("{peer} can no longer see your video")
+            },
+        );
+    }
+
+    /// Decide whether we are listening to a peer.
+    pub fn set_deafened(&mut self, peer: &str, deafened: bool) {
+        let mut permissions = self.permissions_for(peer);
+        permissions.hearing_audio = !deafened;
+        self.permissions.insert(conversation_key(peer), permissions);
+
+        for ((_, who), connection) in &self.connections {
+            if conversation_key(who) == conversation_key(peer) {
+                connection.set_hearing_audio(!deafened);
+            }
+        }
+        self.say_about(
+            peer,
+            if deafened {
+                format!("you will not hear {peer}")
+            } else {
+                format!("you can hear {peer} again")
+            },
+        );
     }
 
     /// Whether somebody is ringing and has not been answered.
@@ -938,6 +1048,12 @@ impl Calls {
                 if matches!(source, Source::Test) {
                     self.say_in(call_id, "sending a test picture and tone");
                 }
+
+                // Applied at once, so a decision made before this peer
+                // joined is not quietly forgotten when they do.
+                let permissions = self.permissions_for(peer);
+                connection.set_sending_video(permissions.may_see_video);
+                connection.set_hearing_audio(permissions.hearing_audio);
 
                 self.connections.insert(key, connection);
                 if sending.video {
