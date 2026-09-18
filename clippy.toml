@@ -1,0 +1,18 @@
+# Proper nouns that clippy's `doc_markdown` lint mistakes for code items.
+# ".." keeps clippy's own default list in addition to these.
+doc-valid-idents = [
+    "..",
+    "IRCv3",
+    "IRCv3's",
+    "WebRTC",
+    "GStreamer",
+    "GTK4",
+    "LiveKit",
+    "OpenSSL",
+    "SQLite",
+    "ChaCha20",
+    "Poly1305",
+    "X25519",
+    "Ed25519",
+    "HKDF",
+]
