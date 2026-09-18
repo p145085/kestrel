@@ -215,6 +215,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kestrel-session"
+version = "0.0.1"
+dependencies = [
+ "base64",
+ "kestrel-proto",
+ "thiserror",
+]
+
+[[package]]
 name = "kestreld"
 version = "0.0.1"
 dependencies = [

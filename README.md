@@ -43,6 +43,9 @@ Early development. Nothing is usable yet.
 - [x] `kestreld-services` — accounts, Argon2 password storage, SASL PLAIN and EXTERNAL
 - [~] `kestreld` — the server binary. Runs over plain TCP; **no TLS yet**, and
       nothing is persisted across restarts
+- [~] `kestrel-session` — the client's sans-io session: capability
+      negotiation, SASL, and tracked channel and member state
+- [ ] `kestrel-net` — the client transport
 - [ ] `kestrel` — the client
 - [ ] Calls
 

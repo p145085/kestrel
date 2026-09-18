@@ -1,0 +1,17 @@
+[package]
+name = "kestrel-session"
+description = "Sans-io IRC client session: capability negotiation, SASL, and tracked state."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+kestrel-proto.workspace = true
+base64.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

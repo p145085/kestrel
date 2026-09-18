@@ -5,3 +5,7 @@ Cargo.lock.bak
 .DS_Store
 /dist
 /artifacts
+
+# Local server config; kestreld.example.toml is the committed template.
+/kestreld.toml
+/data/
