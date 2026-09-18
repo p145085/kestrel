@@ -30,11 +30,15 @@ pub mod client;
 pub mod commands;
 pub mod config;
 pub mod datetime;
+pub mod mask;
+pub mod moderation;
+pub mod modes;
 mod mutate;
 pub mod register;
 pub mod server;
 
-pub use channel::{Channel, ChannelModes, MemberStatus, Topic};
+pub use channel::{BanEntry, Channel, ChannelModes, MemberStatus, Topic};
 pub use client::{Client, ClientId, RegistrationState};
 pub use config::ServerConfig;
+pub use modes::{ModeChange, ModeKind};
 pub use server::{Action, Server};

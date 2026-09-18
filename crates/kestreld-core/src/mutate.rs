@@ -97,3 +97,126 @@ impl Server {
         }
     }
 }
+
+impl Server {
+    /// Grant or revoke a membership prefix. Returns whether anything changed.
+    pub(crate) fn set_member_status(
+        &mut self,
+        folded: &[u8],
+        target: ClientId,
+        letter: u8,
+        adding: bool,
+    ) -> bool {
+        let Some(channel) = self.channels_mut().get_mut(folded) else {
+            return false;
+        };
+        let Some(status) = channel.members.get_mut(&target) else {
+            return false;
+        };
+        let field = match letter {
+            b'o' => &mut status.operator,
+            b'v' => &mut status.voice,
+            _ => return false,
+        };
+        if *field == adding {
+            return false;
+        }
+        *field = adding;
+        true
+    }
+
+    /// Add or remove a ban. Returns whether anything changed.
+    pub(crate) fn set_ban(
+        &mut self,
+        folded: &[u8],
+        mask: &[u8],
+        setter: &[u8],
+        now: u64,
+        adding: bool,
+    ) -> bool {
+        let Some(channel) = self.channels_mut().get_mut(folded) else {
+            return false;
+        };
+        let existing = channel
+            .bans
+            .iter()
+            .position(|b| b.mask.eq_ignore_ascii_case(mask));
+        match (adding, existing) {
+            (true, None) => {
+                channel
+                    .bans
+                    .push(crate::moderation::ban_entry(mask, setter, now));
+                true
+            }
+            (false, Some(index)) => {
+                channel.bans.remove(index);
+                true
+            }
+            // Already in the requested state.
+            _ => false,
+        }
+    }
+
+    /// Set or clear the channel key. Returns whether anything changed.
+    pub(crate) fn set_channel_key(
+        &mut self,
+        folded: &[u8],
+        key: Option<Vec<u8>>,
+        adding: bool,
+    ) -> bool {
+        let Some(channel) = self.channels_mut().get_mut(folded) else {
+            return false;
+        };
+        if adding {
+            let Some(key) = key.filter(|k| !k.is_empty()) else {
+                return false;
+            };
+            if channel.modes.key.as_ref() == Some(&key) {
+                return false;
+            }
+            channel.modes.key = Some(key);
+            true
+        } else {
+            channel.modes.key.take().is_some()
+        }
+    }
+
+    /// Set or clear the member limit. Returns whether anything changed.
+    pub(crate) fn set_channel_limit(&mut self, folded: &[u8], limit: Option<usize>) -> bool {
+        let Some(channel) = self.channels_mut().get_mut(folded) else {
+            return false;
+        };
+        if channel.modes.limit == limit {
+            return false;
+        }
+        channel.modes.limit = limit;
+        true
+    }
+
+    /// Set or clear a parameterless channel flag. Returns whether it changed.
+    pub(crate) fn set_channel_flag(&mut self, folded: &[u8], flag: u8, adding: bool) -> bool {
+        let Some(channel) = self.channels_mut().get_mut(folded) else {
+            return false;
+        };
+        let field = match flag {
+            b'i' => &mut channel.modes.invite_only,
+            b'm' => &mut channel.modes.moderated,
+            b'n' => &mut channel.modes.no_external_messages,
+            b's' => &mut channel.modes.secret,
+            b't' => &mut channel.modes.topic_protected,
+            _ => return false,
+        };
+        if *field == adding {
+            return false;
+        }
+        *field = adding;
+        true
+    }
+
+    /// Record an outstanding invitation.
+    pub(crate) fn record_invite(&mut self, folded: &[u8], target: ClientId) {
+        if let Some(channel) = self.channels_mut().get_mut(folded) {
+            channel.invite(target);
+        }
+    }
+}

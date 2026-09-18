@@ -15,6 +15,17 @@ pub struct Topic {
     pub set_at: u64,
 }
 
+/// One entry of a channel's ban list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BanEntry {
+    /// The full `nick!user@host` mask this entry bans.
+    pub mask: Vec<u8>,
+    /// Mask of whoever set it.
+    pub setter: Vec<u8>,
+    /// When it was set, in Unix seconds.
+    pub set_at: u64,
+}
+
 /// A member's status within one channel.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MemberStatus {
@@ -147,6 +158,7 @@ pub struct Channel {
     pub(crate) created_at: u64,
     /// Clients holding an outstanding invitation to an invite-only channel.
     pub(crate) invited: Vec<ClientId>,
+    pub(crate) bans: Vec<BanEntry>,
 }
 
 impl Channel {
@@ -158,6 +170,7 @@ impl Channel {
             modes: ChannelModes::default(),
             created_at,
             invited: Vec::new(),
+            bans: Vec::new(),
         }
     }
 
@@ -203,6 +216,20 @@ impl Channel {
         self.members.contains_key(&client)
     }
 
+    /// The channel's ban list.
+    #[must_use]
+    pub fn bans(&self) -> &[BanEntry] {
+        &self.bans
+    }
+
+    /// Whether `mask` is covered by any ban.
+    #[must_use]
+    pub fn is_banned(&self, mask: &[u8]) -> bool {
+        self.bans
+            .iter()
+            .any(|ban| crate::mask::matches(&ban.mask, mask))
+    }
+
     /// Whether `client` holds an outstanding invitation.
     #[must_use]
     pub fn is_invited(&self, client: ClientId) -> bool {
@@ -236,6 +263,12 @@ impl Channel {
 
     pub(crate) fn remove_member(&mut self, client: ClientId) {
         self.members.remove(&client);
+    }
+
+    pub(crate) fn invite(&mut self, client: ClientId) {
+        if !self.invited.contains(&client) {
+            self.invited.push(client);
+        }
     }
 }
 

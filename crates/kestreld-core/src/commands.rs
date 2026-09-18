@@ -122,44 +122,12 @@ impl Server {
             return;
         }
 
-        // Entry conditions, checked only for channels that already exist: a
-        // channel you are creating cannot be full, keyed, or invite-only.
-        if let Some(channel) = self.channel(name) {
-            let modes = channel.modes();
-            if let Some(limit) = modes.limit
-                && channel.len() >= limit
-            {
-                out.push(Action::Send {
-                    to: id,
-                    message: self
-                        .numeric(id, numeric::ERR_CHANNELISFULL)
-                        .param(name.to_vec())
-                        .trailing("Cannot join channel (+l)"),
-                });
-                return;
-            }
-            if let Some(expected) = modes.key.as_deref()
-                && key != Some(expected)
-            {
-                out.push(Action::Send {
-                    to: id,
-                    message: self
-                        .numeric(id, numeric::ERR_BADCHANNELKEY)
-                        .param(name.to_vec())
-                        .trailing("Cannot join channel (+k)"),
-                });
-                return;
-            }
-            if modes.invite_only && !channel.is_invited(id) {
-                out.push(Action::Send {
-                    to: id,
-                    message: self
-                        .numeric(id, numeric::ERR_INVITEONLYCHAN)
-                        .param(name.to_vec())
-                        .trailing("Cannot join channel (+i)"),
-                });
-                return;
-            }
+        if let Some(denial) = self.join_denial(id, name, key) {
+            out.push(Action::Send {
+                to: id,
+                message: denial,
+            });
+            return;
         }
 
         self.insert_member(&folded, name.to_vec(), id, now);
@@ -195,6 +163,51 @@ impl Server {
             });
         }
         self.send_names(id, &display, out);
+    }
+
+    /// Why `id` may not join `name`, if it may not.
+    ///
+    /// Entry conditions apply only to channels that already exist: a channel
+    /// you are creating cannot be full, keyed, banned or invite-only.
+    fn join_denial(&self, id: ClientId, name: &[u8], key: Option<&[u8]>) -> Option<MessageBuf> {
+        let channel = self.channel(name)?;
+        let modes = channel.modes();
+
+        if let Some(limit) = modes.limit
+            && channel.len() >= limit
+        {
+            return Some(
+                self.numeric(id, numeric::ERR_CHANNELISFULL)
+                    .param(name.to_vec())
+                    .trailing("Cannot join channel (+l)"),
+            );
+        }
+        if let Some(expected) = modes.key.as_deref()
+            && key != Some(expected)
+        {
+            return Some(
+                self.numeric(id, numeric::ERR_BADCHANNELKEY)
+                    .param(name.to_vec())
+                    .trailing("Cannot join channel (+k)"),
+            );
+        }
+        // A ban keeps you out unless you were explicitly invited past it.
+        let joiner_mask = self.client(id).map(Client::mask).unwrap_or_default();
+        if channel.is_banned(&joiner_mask) && !channel.is_invited(id) {
+            return Some(
+                self.numeric(id, numeric::ERR_BANNEDFROMCHAN)
+                    .param(name.to_vec())
+                    .trailing("Cannot join channel (+b)"),
+            );
+        }
+        if modes.invite_only && !channel.is_invited(id) {
+            return Some(
+                self.numeric(id, numeric::ERR_INVITEONLYCHAN)
+                    .param(name.to_vec())
+                    .trailing("Cannot join channel (+i)"),
+            );
+        }
+        None
     }
 
     pub(crate) fn cmd_part(&mut self, id: ClientId, msg: &Message<'_>, out: &mut Vec<Action>) {
@@ -318,11 +331,16 @@ impl Server {
 
         let is_member = channel.contains(id);
         let modes = channel.modes();
+        let may_speak_over_restrictions = channel
+            .status(id)
+            .is_some_and(crate::channel::MemberStatus::may_speak_when_moderated);
+        // Being banned silences you even while still in the channel, unless an
+        // operator has voiced you — which is the usual way a ban is softened.
+        let banned = !may_speak_over_restrictions
+            && channel.is_banned(&self.client(id).map(Client::mask).unwrap_or_default());
         let blocked = (modes.no_external_messages && !is_member)
-            || (modes.moderated
-                && !channel
-                    .status(id)
-                    .is_some_and(crate::channel::MemberStatus::may_speak_when_moderated));
+            || (modes.moderated && !may_speak_over_restrictions)
+            || banned;
 
         if blocked {
             if !is_notice {
