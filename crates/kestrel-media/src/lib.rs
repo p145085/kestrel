@@ -18,7 +18,9 @@ pub use gstreamer;
 use gstreamer as gst;
 use tracing::debug;
 
-pub use peer::{ConnectionState, IceState, PeerConnection, PeerEvent, Sending, Source, cameras};
+pub use peer::{
+    ConnectionState, IceState, PeerConnection, PeerEvent, Sending, Source, cameras, microphones,
+};
 
 /// Why the media engine could not do something.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

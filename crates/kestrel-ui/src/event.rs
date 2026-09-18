@@ -179,12 +179,18 @@ pub enum AppEvent {
     VideoWanted {
         /// Whose video.
         peer: String,
+        /// The conversation the call belongs to, so the picture appears there
+        /// and not on top of an unrelated channel.
+        target: String,
     },
     /// Our own camera needs somewhere to be drawn.
     ///
     /// Answered with [`UiCommand::SelfViewSink`], for the same reason as
     /// [`AppEvent::VideoWanted`].
-    SelfViewWanted,
+    SelfViewWanted {
+        /// The conversation the call belongs to.
+        target: String,
+    },
     /// The connection ended.
     Disconnected {
         /// Why.
@@ -222,6 +228,17 @@ pub enum UiCommand {
     },
     /// Do something with a call.
     Call(CallAction),
+    /// Choose what a conversation captures from.
+    Devices {
+        /// Which conversation.
+        target: String,
+        /// Which camera, or the default.
+        camera: Option<String>,
+        /// Which microphone, or the default.
+        microphone: Option<String>,
+        /// Generated media instead of any device at all.
+        test: bool,
+    },
     /// Draw our own camera into this sink.
     SelfViewSink {
         /// Where to draw it.

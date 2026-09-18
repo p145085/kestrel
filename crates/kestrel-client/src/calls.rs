@@ -66,12 +66,19 @@ pub struct Calls {
     media_tx: mpsc::UnboundedSender<TaggedMediaEvent>,
     /// What the client should show, waiting to be collected.
     notices: Vec<Notice>,
-    /// Peers whose video has nowhere to go yet.
-    video_wanted: Vec<String>,
-    /// Whether our own picture still needs somewhere to go.
-    self_view_wanted: bool,
+    /// Peers whose video has nowhere to go yet, and the conversation
+    /// each call belongs to.
+    video_wanted: Vec<(String, String)>,
+    /// The conversation our own picture still needs a home in.
+    self_view_wanted: Option<String>,
     /// Where our identity and pinned keys are kept, if anywhere.
     store: Option<Store>,
+    /// Devices chosen for particular conversations.
+    ///
+    /// One camera for a friend and another for a channel is a reasonable
+    /// thing to want, and the choice belongs to the conversation rather than
+    /// to the client as a whole.
+    per_target: HashMap<String, Source>,
 }
 
 struct ActiveCall {
@@ -123,7 +130,11 @@ impl Calls {
             privacy: Privacy::Direct,
             nick: String::new(),
             account: None,
-            source: Source::Devices { camera: None },
+            source: Source::Devices {
+                camera: None,
+                microphone: None,
+            },
+            per_target: HashMap::new(),
             media: MediaWanted::audio_video(),
             active: HashMap::new(),
             connections: HashMap::new(),
@@ -132,7 +143,7 @@ impl Calls {
             media_tx,
             notices: Vec::new(),
             video_wanted: Vec::new(),
-            self_view_wanted: false,
+            self_view_wanted: None,
             store: None,
         }
     }
@@ -181,7 +192,7 @@ impl Calls {
     /// belongs to whatever owns the display, and on most toolkits it
     /// cannot leave the thread that made it. So the peer is named here
     /// and the element comes back.
-    pub fn take_video_wanted(&mut self) -> Vec<String> {
+    pub fn take_video_wanted(&mut self) -> Vec<(String, String)> {
         std::mem::take(&mut self.video_wanted)
     }
 
@@ -189,8 +200,8 @@ impl Calls {
     ///
     /// Asked once per call rather than once per peer: there is one
     /// camera, so there is one picture of it to show.
-    pub fn take_self_view_wanted(&mut self) -> bool {
-        std::mem::take(&mut self.self_view_wanted)
+    pub fn take_self_view_wanted(&mut self) -> Option<String> {
+        self.self_view_wanted.take()
     }
 
     /// Draw our own camera into this sink.
@@ -309,10 +320,50 @@ impl Calls {
         self.say("calls will use test tones and a test pattern, not your devices");
     }
 
+    /// Choose what a particular conversation captures from.
+    ///
+    /// Applies from the next call in that conversation; a call already under
+    /// way keeps the devices it opened, because swapping a live capture is a
+    /// different and much more delicate thing than choosing one.
+    pub fn set_devices(&mut self, target: &str, source: Source) {
+        let description = match &source {
+            Source::Test => "a test picture and tone".to_owned(),
+            Source::Devices { camera, microphone } => format!(
+                "{} and {}",
+                camera
+                    .clone()
+                    .unwrap_or_else(|| "the default camera".into()),
+                microphone
+                    .clone()
+                    .unwrap_or_else(|| "the default microphone".into())
+            ),
+        };
+        self.per_target.insert(target.to_owned(), source);
+        self.notices.push(Notice::in_target(
+            Level::Info,
+            format!("calls here will use {description}"),
+            target,
+        ));
+    }
+
+    /// What a conversation captures from, falling back to the client's own.
+    #[must_use]
+    pub fn devices_for(&self, target: &str) -> Source {
+        self.per_target
+            .get(target)
+            .cloned()
+            .unwrap_or_else(|| self.source.clone())
+    }
+
     /// Use a named camera rather than whichever one the system ranks first.
     pub fn use_camera(&mut self, camera: String) {
+        let microphone = match &self.source {
+            Source::Devices { microphone, .. } => microphone.clone(),
+            Source::Test => None,
+        };
         self.source = Source::Devices {
             camera: Some(camera),
+            microphone,
         };
     }
 
@@ -812,8 +863,12 @@ impl Calls {
             video: media.video,
         };
         let name = format!("{call_id}-{peer}");
+        let source = self.active.get(call_id).map_or_else(
+            || self.source.clone(),
+            |entry| self.devices_for(&entry.target),
+        );
 
-        if matches!(self.source, Source::Devices { .. }) {
+        if matches!(source, Source::Devices { .. }) {
             // Said before it happens, not after. On Windows the default camera
             // can be a paired phone, so opening it makes that phone ring.
             self.say(format!(
@@ -826,7 +881,7 @@ impl Calls {
             ));
         }
 
-        match PeerConnection::new(&name, sending, &self.source, None) {
+        match PeerConnection::new(&name, sending, &source, None) {
             Ok((connection, mut events)) => {
                 // Media events arrive on GStreamer's threads; tagging and
                 // forwarding them is all that happens there.
@@ -850,8 +905,12 @@ impl Calls {
                     // Asked for now rather than when the first frame arrives:
                     // a sink handed over early is simply held, and one handed
                     // over late means frames with nowhere to go in between.
-                    self.video_wanted.push(peer.to_owned());
-                    self.self_view_wanted = true;
+                    let target = self
+                        .active
+                        .get(call_id)
+                        .map_or_else(|| peer.to_owned(), |entry| entry.target.clone());
+                    self.video_wanted.push((peer.to_owned(), target.clone()));
+                    self.self_view_wanted = Some(target);
                 }
             }
             Err(error) => self.warn(format!("could not open the microphone or camera: {error}")),

@@ -150,7 +150,7 @@ async fn main() {
 
                 // Answering the engine's request for somewhere to draw,
                 // exactly as the window does when it builds a paintable sink.
-                if let AppEvent::VideoWanted { peer } = &event {
+                if let AppEvent::VideoWanted { peer, .. } = &event {
                     let (sink, frames) = counting_sink();
                     drawing.push((peer.clone(), frames));
                     let _ = commands_tx.send(UiCommand::VideoSink {
@@ -158,7 +158,7 @@ async fn main() {
                         sink,
                     });
                 }
-                if matches!(event, AppEvent::SelfViewWanted) {
+                if matches!(event, AppEvent::SelfViewWanted { .. }) {
                     let (sink, frames) = counting_sink();
                     drawing.push(("you".to_owned(), frames));
                     let _ = commands_tx.send(UiCommand::SelfViewSink { sink });

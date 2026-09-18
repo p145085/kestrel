@@ -45,6 +45,11 @@ struct State {
     last: Option<(ConnectConfig, SessionConfig)>,
     /// How calls from this window are placed.
     call_options: CallOptions,
+    /// The pictures on screen, and the conversation each belongs to.
+    ///
+    /// A call in a private conversation has no business covering a channel
+    /// somebody switched to in order to read it.
+    pictures: Vec<(BufferId, gtk::Widget)>,
     /// Somebody is ringing.
     ringing: bool,
     /// A call is in progress.
@@ -192,6 +197,7 @@ impl Window {
                 connected: true,
                 last: None,
                 call_options: CallOptions::default(),
+                pictures: Vec::new(),
                 ringing: false,
                 in_call: false,
             })),
@@ -319,8 +325,8 @@ impl Window {
                 }
                 self.update_actions();
             }
-            AppEvent::SelfViewWanted => self.show_video("you"),
-            AppEvent::VideoWanted { peer } => self.show_video(&peer),
+            AppEvent::SelfViewWanted { target } => self.show_video("you", &target),
+            AppEvent::VideoWanted { peer, target } => self.show_video(&peer, &target),
             AppEvent::Disconnected { reason } => {
                 self.state.borrow_mut().connected = false;
                 self.append(
@@ -409,6 +415,7 @@ impl Window {
 
         self.rebuild_sidebar();
         self.redraw_members();
+        self.redraw_video();
         self.redraw_topic();
         self.retitle();
         self.update_actions();
@@ -568,16 +575,45 @@ impl Window {
         }
 
         for member in members {
-            self.members.append(
-                &gtk::Label::builder()
-                    .label(&member)
-                    .xalign(0.0)
-                    .margin_start(8)
-                    .margin_end(8)
-                    .margin_top(2)
-                    .margin_bottom(2)
-                    .build(),
-            );
+            let label = gtk::Label::builder()
+                .label(&member)
+                .xalign(0.0)
+                .margin_start(8)
+                .margin_end(8)
+                .margin_top(2)
+                .margin_bottom(2)
+                .build();
+
+            // The prefix says what they can do in the channel, not who they
+            // are; everything offered here is addressed to the person.
+            let nick = member
+                .trim_start_matches(['~', '&', '@', '%', '+'])
+                .to_owned();
+
+            let menu = gtk::PopoverMenu::from_model(Some(&member_menu(&nick)));
+            menu.set_parent(&label);
+            menu.set_has_arrow(false);
+            menu.set_halign(gtk::Align::Start);
+
+            let click = gtk::GestureClick::new();
+            click.set_button(gdk::BUTTON_SECONDARY);
+            let showing = menu.clone();
+            click.connect_pressed(move |_, _, x, y| {
+                // A pointer lands on a whole pixel by the time it reaches a
+                // rectangle; the fraction carries no meaning here.
+                let at = |value: f64| {
+                    let clamped = value.round().clamp(0.0, f64::from(i32::MAX));
+                    #[allow(clippy::cast_possible_truncation)]
+                    {
+                        clamped as i32
+                    }
+                };
+                showing.set_pointing_to(Some(&gdk::Rectangle::new(at(x), at(y), 1, 1)));
+                showing.popup();
+            });
+            label.add_controller(click);
+
+            self.members.append(&label);
         }
     }
 
@@ -664,6 +700,26 @@ impl Window {
             }
         });
 
+        // Actions that carry who they are about, for the member list's own
+        // menu. A plain action cannot say which person was clicked.
+        for name in ["call-nick", "query-nick", "whois-nick"] {
+            let action = gio::SimpleAction::new(name, Some(glib::VariantTy::STRING));
+            let ui = self.clone();
+            let which = name;
+            action.connect_activate(move |_, parameter| {
+                let Some(nick) = parameter.and_then(glib::Variant::str) else {
+                    return;
+                };
+                match which {
+                    "call-nick" => ui.call(CallAction::Start(nick.to_owned())),
+                    "query-nick" => ui.run(&format!("/query {nick}")),
+                    _ => ui.run(&format!("/whois {nick}")),
+                }
+            });
+            window.add_action(&action);
+        }
+
+        self.add_action(window, "devices", Self::choose_devices);
         self.add_action(window, "next-buffer", |ui| ui.cycle_buffer(1));
         self.add_action(window, "previous-buffer", |ui| ui.cycle_buffer(-1));
 
@@ -886,7 +942,7 @@ impl Window {
     /// leave; the sink element itself is ordinary and crosses to the media
     /// thread, where it is plugged into the pipeline. Nothing GTK owns ever
     /// goes the other way.
-    fn show_video(&self, peer: &str) {
+    fn show_video(&self, peer: &str, target: &str) {
         let Ok(sink) = kestrel_media::gstreamer::ElementFactory::make("gtk4paintablesink").build()
         else {
             self.append(
@@ -957,7 +1013,11 @@ impl Window {
         } else {
             self.videos.append(&labelled);
         }
-        self.videos.set_visible(true);
+        self.state
+            .borrow_mut()
+            .pictures
+            .push((target.to_owned(), labelled.clone().upcast()));
+        self.redraw_video();
 
         // "you" is not a nickname anybody can have, so it cannot collide
         // with a peer of that name.
@@ -977,7 +1037,128 @@ impl Window {
         while let Some(child) = self.videos.first_child() {
             self.videos.remove(&child);
         }
+        self.state.borrow_mut().pictures.clear();
         self.videos.set_visible(false);
+    }
+
+    /// Show only the pictures belonging to the conversation on screen.
+    fn redraw_video(&self) {
+        let state = self.state.borrow();
+        let mut any = false;
+        for (target, widget) in &state.pictures {
+            let mine = target == &state.current;
+            widget.set_visible(mine);
+            any |= mine;
+        }
+        self.videos.set_visible(any);
+    }
+
+    /// Choose what this conversation captures from.
+    ///
+    /// Per conversation rather than per client, because sending a webcam to a
+    /// channel and a virtual camera to one person is an ordinary thing to
+    /// want and impossible to express with a single global setting.
+    fn choose_devices(&self) {
+        let Some(parent) = self.window() else { return };
+        let target = self.state.borrow().current.clone();
+        if target.is_empty() {
+            self.append(
+                SERVER_BUFFER,
+                &Line::error("choose a conversation first; devices are set per conversation"),
+            );
+            return;
+        }
+
+        // Enumerated here rather than cached, because a camera plugged in
+        // after the window opened is exactly when somebody goes looking.
+        let cameras = kestrel_media::cameras();
+        let microphones = kestrel_media::microphones();
+
+        let camera = device_chooser(&cameras);
+        let microphone = device_chooser(&microphones);
+        let test = gtk::CheckButton::with_label("Use a test picture and tone instead");
+
+        let grid = gtk::Grid::builder()
+            .row_spacing(8)
+            .column_spacing(12)
+            .margin_top(16)
+            .margin_bottom(16)
+            .margin_start(16)
+            .margin_end(16)
+            .build();
+        grid.attach(
+            &gtk::Label::builder()
+                .label(format!("What to send in {target}"))
+                .xalign(0.0)
+                .build(),
+            0,
+            0,
+            2,
+            1,
+        );
+        for (row, (name, chooser)) in [("Camera", &camera), ("Microphone", &microphone)]
+            .into_iter()
+            .enumerate()
+        {
+            let row = i32::try_from(row).unwrap_or(0) + 1;
+            grid.attach(
+                &gtk::Label::builder().label(name).xalign(1.0).build(),
+                0,
+                row,
+                1,
+                1,
+            );
+            grid.attach(chooser, 1, row, 1, 1);
+        }
+        grid.attach(&test, 1, 3, 1, 1);
+        grid.attach(
+            &gtk::Label::builder()
+                .label(
+                    "Applies to the next call here. A call already running keeps what it opened.",
+                )
+                .xalign(0.0)
+                .wrap(true)
+                .css_classes(["dim-label"])
+                .build(),
+            0,
+            4,
+            2,
+            1,
+        );
+
+        let cancel = gtk::Button::with_label("Cancel");
+        let apply = gtk::Button::with_label("Use these");
+        apply.add_css_class("suggested-action");
+        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        buttons.set_halign(gtk::Align::End);
+        buttons.append(&cancel);
+        buttons.append(&apply);
+        grid.attach(&buttons, 0, 5, 2, 1);
+
+        let dialog = gtk::Window::builder()
+            .transient_for(&parent)
+            .modal(true)
+            .title("Devices")
+            .child(&grid)
+            .build();
+
+        let ui = self.clone();
+        let closing = dialog.clone();
+        let chosen = (camera.clone(), microphone.clone(), test.clone());
+        apply.connect_clicked(move |_| {
+            let (camera, microphone, test) = &chosen;
+            let _ = ui.commands.borrow().send(UiCommand::Devices {
+                target: target.clone(),
+                camera: chosen_device(camera),
+                microphone: chosen_device(microphone),
+                test: test.is_active(),
+            });
+            closing.close();
+        });
+
+        let closing = dialog.clone();
+        cancel.connect_clicked(move |_| closing.close());
+        dialog.present();
     }
 
     /// Ask the connection to do something with a call.
@@ -1104,7 +1285,8 @@ impl Window {
 /// Named in one place so a menu entry pointing at an action nobody installed
 /// cannot slip through: GTK renders such an entry greyed out and says nothing,
 /// which looks exactly like a feature that is merely unavailable.
-const ACTIONS: [&str; 17] = [
+const ACTIONS: [&str; 18] = [
+    "devices",
     "next-buffer",
     "previous-buffer",
     "connect",
@@ -1123,6 +1305,49 @@ const ACTIONS: [&str; 17] = [
     "answer",
     "hangup",
 ];
+
+/// What a right click on somebody in the member list offers.
+///
+/// Built per person rather than shared, because the actions have to carry who
+/// they are about and a menu model has no other way to say so.
+fn member_menu(nick: &str) -> gio::Menu {
+    let menu = gio::Menu::new();
+    menu.append(
+        Some(&format!("Call {nick}")),
+        Some(&format!("win.call-nick::{nick}")),
+    );
+    menu.append(
+        Some(&format!("Message {nick}")),
+        Some(&format!("win.query-nick::{nick}")),
+    );
+    menu.append(
+        Some(&format!("Who is {nick}")),
+        Some(&format!("win.whois-nick::{nick}")),
+    );
+    menu
+}
+
+/// A dropdown over a list of device names, with the default first.
+fn device_chooser(names: &[String]) -> gtk::DropDown {
+    let mut entries: Vec<&str> = vec!["(system default)"];
+    entries.extend(names.iter().map(String::as_str));
+    let chooser = gtk::DropDown::from_strings(&entries);
+    chooser.set_hexpand(true);
+    chooser
+}
+
+/// What a chooser is pointing at, or `None` for the default.
+fn chosen_device(chooser: &gtk::DropDown) -> Option<String> {
+    let selected = chooser.selected();
+    if selected == 0 {
+        return None;
+    }
+    chooser
+        .model()
+        .and_downcast::<gtk::StringList>()
+        .and_then(|list| list.string(selected))
+        .map(|name| name.to_string())
+}
 
 /// The menu bar's contents.
 ///
@@ -1144,6 +1369,7 @@ fn menu_model() -> gio::Menu {
 
     let call = gio::Menu::new();
     call.append(Some("Start Call…"), Some("win.call"));
+    call.append(Some("Devices…"), Some("win.devices"));
     call.append(Some("Answer"), Some("win.answer"));
     call.append(Some("Reject"), Some("win.reject"));
     call.append(Some("Confirm Spoken Phrase"), Some("win.verify"));

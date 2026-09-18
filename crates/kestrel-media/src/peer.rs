@@ -58,6 +58,8 @@ pub enum Source {
     Devices {
         /// Which camera, or the system default.
         camera: Option<String>,
+        /// Which microphone, or the system default.
+        microphone: Option<String>,
     },
     /// Generated test patterns.
     ///
@@ -754,32 +756,52 @@ fn build_receive_chain(
     is_video: bool,
     wanted: Option<gst::Element>,
 ) -> Result<Chain, MediaError> {
-    let converter = if is_video {
+    let queue = make("queue")?;
+    let convert = make(if is_video {
         "videoconvert"
     } else {
         "audioconvert"
+    })?;
+
+    // Audio is resampled because a device rarely runs at whatever rate the
+    // far end encoded at, and a sink that cannot take the rate it is given
+    // simply fails to negotiate.
+    let resample = if is_video {
+        None
+    } else {
+        Some(make("audioresample")?)
     };
-    let queue = gst::ElementFactory::make("queue")
-        .build()
-        .map_err(|_| MediaError::MissingElement("queue"))?;
-    let convert = gst::ElementFactory::make(converter)
-        .build()
-        .map_err(|_| MediaError::MissingElement("converter"))?;
+
     let sink = match wanted {
         Some(sink) => sink,
-        None => gst::ElementFactory::make("fakesink")
+        // Video has nowhere to go until the interface says where, and is
+        // discarded meanwhile; audio has an obvious destination and no reason
+        // to wait for anybody to choose it.
+        None if is_video => gst::ElementFactory::make("fakesink")
             .property("sync", false)
             .build()
             .map_err(|_| MediaError::MissingElement("fakesink"))?,
+        None => make("autoaudiosink").or_else(|_| {
+            warn!("no audio output; the call will be silent");
+            gst::ElementFactory::make("fakesink")
+                .property("sync", false)
+                .build()
+                .map_err(|_| MediaError::MissingElement("fakesink"))
+        })?,
     };
 
-    let elements = [&queue, &convert, &sink];
+    let mut elements = vec![&queue, &convert];
+    if let Some(resample) = &resample {
+        elements.push(resample);
+    }
+    elements.push(&sink);
+
     pipeline
-        .add_many(elements)
+        .add_many(&elements)
         .map_err(|_| MediaError::Pipeline("could not add a receive chain".into()))?;
-    gst::Element::link_many(elements)
+    gst::Element::link_many(&elements)
         .map_err(|_| MediaError::Pipeline("could not link a receive chain".into()))?;
-    for element in elements {
+    for element in &elements {
         element
             .sync_state_with_parent()
             .map_err(|_| MediaError::Pipeline("receive chain would not start".into()))?;
@@ -787,7 +809,8 @@ fn build_receive_chain(
 
     Ok(Chain {
         head: queue,
-        convert,
+        // The cut point for a later sink swap is whatever feeds it.
+        convert: resample.unwrap_or(convert),
         sink,
     })
 }
@@ -881,6 +904,20 @@ fn watch_bus(pipeline: &gst::Pipeline, events: &mpsc::UnboundedSender<PeerEvent>
     });
 }
 
+/// The microphones this machine offers.
+#[must_use]
+pub fn microphones() -> Vec<String> {
+    audio_devices()
+        .iter()
+        .map(|device| device.display_name().to_string())
+        .collect()
+}
+
+/// Every device the monitor considers an audio source.
+fn audio_devices() -> Vec<gst::Device> {
+    devices_of_kind("Audio")
+}
+
 /// The cameras this machine offers, in the order the system ranks them.
 ///
 /// Worth showing before opening anything: the first entry is what a default
@@ -895,18 +932,23 @@ pub fn cameras() -> Vec<String> {
 }
 
 /// Every device the monitor considers a video source.
+fn video_devices() -> Vec<gst::Device> {
+    devices_of_kind("Video")
+}
+
+/// Capture devices of one kind, best backend first and one entry per name.
 ///
 /// Both orderings of the class are accepted because Windows reports
 /// `Video/Source` for some backends and `Source/Video` for others, and a
-/// filter matching only one of them silently hides half the cameras.
-fn video_devices() -> Vec<gst::Device> {
+/// filter matching only one of them silently hides half the devices.
+fn devices_of_kind(kind: &str) -> Vec<gst::Device> {
     let monitor = gst::DeviceMonitor::new();
     if monitor.start().is_err() {
         return Vec::new();
     }
     let found = monitor.devices().into_iter().filter(|device| {
         let class = device.device_class();
-        class.contains("Video") && class.contains("Source")
+        class.contains(kind) && class.contains("Source")
     });
 
     // Windows offers one physical camera through more than one backend, and
@@ -952,24 +994,24 @@ fn backend_rank(device: &gst::Device) -> u8 {
     }
 }
 
-/// Build a source for whichever camera the system ranks first.
-fn first_camera() -> Option<gst::Element> {
-    let device = video_devices().into_iter().next()?;
-    debug!("opening the default camera, {}", device.display_name());
+/// Build a source for whichever device the system ranks first.
+fn first_device(devices: &[gst::Device]) -> Option<gst::Element> {
+    let device = devices.first()?;
+    debug!("opening the default device, {}", device.display_name());
     device.create_element(None).ok()
 }
 
-/// Build a source for the first camera whose name contains `wanted`.
+/// Build a source for the first device whose name contains `wanted`.
 ///
 /// Returns `None` when nothing matches, leaving the caller to fall back to the
-/// default rather than failing outright -- a camera that has been unplugged
-/// since it was chosen should not stop a call from happening at all.
-fn open_camera(wanted: &str) -> Option<gst::Element> {
+/// default rather than failing outright -- a camera unplugged since it was
+/// chosen should not stop a call from happening at all.
+fn open_device(devices: &[gst::Device], wanted: &str) -> Option<gst::Element> {
     let wanted = wanted.to_lowercase();
-    let device = video_devices()
-        .into_iter()
+    let device = devices
+        .iter()
         .find(|device| device.display_name().to_lowercase().contains(&wanted))?;
-    debug!("opening camera {}", device.display_name());
+    debug!("opening device {}", device.display_name());
     device.create_element(None).ok()
 }
 
@@ -983,10 +1025,20 @@ fn add_audio(
             .property("is-live", true)
             .property_from_str("wave", "ticks")
             .build(),
-        Source::Devices { .. } => gst::ElementFactory::make("wasapi2src")
-            .property("low-latency", true)
-            .build()
-            .or_else(|_| gst::ElementFactory::make("autoaudiosrc").build()),
+        Source::Devices { microphone, .. } => {
+            let microphones = audio_devices();
+            let chosen = match microphone.as_deref() {
+                Some(wanted) => open_device(&microphones, wanted),
+                None => first_device(&microphones),
+            };
+            match chosen {
+                Some(src) => Ok(src),
+                None => gst::ElementFactory::make("wasapi2src")
+                    .property("low-latency", true)
+                    .build()
+                    .or_else(|_| gst::ElementFactory::make("autoaudiosrc").build()),
+            }
+        }
     }
     .map_err(|_| MediaError::MissingElement("audio source"))?;
     src.set_property("name", MICROPHONE);
@@ -1022,15 +1074,16 @@ fn add_video(
             .property("is-live", true)
             .property_from_str("pattern", "ball")
             .build(),
-        Source::Devices { camera } => {
+        Source::Devices { camera, .. } => {
             // Named or not, the camera comes from the device monitor, so what
             // a call opens is the same list `cameras` reports and the first
             // entry really is the default. Reaching for a bare `mfvideosrc`
             // instead would quietly pick whatever the OS ranks first, which
             // is not necessarily anything attached to this machine.
+            let cameras = video_devices();
             let chosen = match camera.as_deref() {
-                Some(wanted) => open_camera(wanted),
-                None => first_camera(),
+                Some(wanted) => open_device(&cameras, wanted),
+                None => first_device(&cameras),
             };
             match chosen {
                 Some(src) => Ok(src),
@@ -1163,4 +1216,40 @@ fn make(factory: &'static str) -> Result<gst::Element, MediaError> {
     gst::ElementFactory::make(factory)
         .build()
         .map_err(|_| MediaError::MissingElement(factory))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a receive chain in a throwaway pipeline and say where it ends.
+    fn sink_factory_for(is_video: bool) -> String {
+        crate::init().expect("GStreamer should initialise");
+        let pipeline = gst::Pipeline::new();
+        let chain = build_receive_chain(&pipeline, is_video, None).expect("should build");
+        let name = chain
+            .sink
+            .factory()
+            .map_or_else(|| "none".to_owned(), |f| f.name().to_string());
+        let _ = pipeline.set_state(gst::State::Null);
+        name
+    }
+
+    #[test]
+    fn incoming_audio_reaches_a_speaker() {
+        // It was decoded and thrown away, which is audible as a call that
+        // connects, reports the other side's audio, and stays silent.
+        let sink = sink_factory_for(false);
+        assert_ne!(
+            sink, "fakesink",
+            "audio must end somewhere that makes a sound"
+        );
+    }
+
+    #[test]
+    fn incoming_video_waits_for_somewhere_to_be_drawn() {
+        // The opposite case: the engine has no business choosing a window, so
+        // video is discarded until the interface supplies a sink.
+        assert_eq!(sink_factory_for(true), "fakesink");
+    }
 }

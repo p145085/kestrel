@@ -12,7 +12,10 @@ async fn main() {
     // it sends a video request to it.
     let source = if std::env::args().any(|a| a == "--devices") {
         println!("opening your real microphone and camera");
-        Source::Devices { camera: None }
+        Source::Devices {
+            camera: None,
+            microphone: None,
+        }
     } else {
         Source::Test
     };
