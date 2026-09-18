@@ -4,6 +4,7 @@ members = [
     "crates/kestrel-proto",
     "crates/kestreld-core",
     "crates/kestreld-services",
+    "crates/kestreld",
 ]
 
 [workspace.package]
@@ -23,6 +24,12 @@ argon2 = { version = "0.5", features = ["std"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 base64 = "0.22"
 subtle = "2.6"
+tokio = "1"
+serde = "1"
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+anyhow = "1"
 memchr = "2.7"
 thiserror = "2"
 smallvec = { version = "1.13", features = ["union", "const_generics"] }

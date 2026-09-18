@@ -37,23 +37,43 @@ encrypted in transit but the server can decrypt it. The UI says so.
 Early development. Nothing is usable yet.
 
 - [x] `kestrel-proto` — sans-io IRC codec: messages, IRCv3 tags, sources, casemapping, numerics
-- [~] `kestreld-core` — server state machine: registration, channels, modes, messaging, queries
+- [x] `kestrel-proto` shares one codec between client and server, so the wire format cannot drift
+- [x] `kestreld-core` — registration, channels, modes, bans, messaging, queries
 - [x] `kestreld-services` — accounts, Argon2 password storage, SASL PLAIN and EXTERNAL
-- [ ] `kestreld` — the server binary: TLS, sockets, persistence
+- [~] `kestreld` — the server binary. Runs over plain TCP; **no TLS yet**, and
+      nothing is persisted across restarts
 - [ ] `kestrel` — the client
 - [ ] Calls
 
-Nothing listens on a socket yet, so there is still nothing to connect to.
+**The server works.** You can point HexChat, WeeChat or irssi at it today and
+chat: register, join channels, set modes and topics, kick, ban, and authenticate
+with SASL. What is missing is TLS, persistence, and every part of the calls
+feature — so this is worth running locally, and not worth running publicly.
+
+## Running the server
+
+```sh
+cargo run -p kestreld -- kestreld.example.toml
+```
+
+Then connect a client to `127.0.0.1:6667`. `kestreld --print-config` prints a
+default configuration file to start from.
 
 ## Building
 
 Requires a recent stable Rust toolchain.
 
 ```sh
-cargo test        # run the suite
+cargo test --workspace
 cargo clippy --all-targets
 cargo fmt --all
 ```
+
+The protocol crates are sans-io and sans-clock — messages and the current time
+come in as arguments — so the whole of the server's behaviour is tested
+in-process, without sockets or a scheduler. `crates/kestreld/tests` adds
+end-to-end tests over real TCP for the parts that only exist once there is a
+socket: line framing across packet boundaries, and abrupt disconnects.
 
 Later phases add GTK4 and GStreamer, which are large native dependencies; build
 instructions for each platform will land alongside the crates that need them.

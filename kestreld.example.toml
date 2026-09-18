@@ -1,0 +1,38 @@
+# Example kestreld configuration.
+# Copy to kestreld.toml and edit. `kestreld --print-config` prints the defaults.
+
+# Addresses to accept connections on.
+# Connections are plaintext for now, so bind to localhost until TLS lands.
+listen = ["127.0.0.1:6667"]
+
+server_name = "kestrel.local"
+network_name = "Kestrel"
+
+motd = [
+    "Welcome to this Kestrel server.",
+    "",
+    "Calls are not implemented yet; this is a text IRC server for now.",
+]
+
+# Name folding: "rfc1459" (default), "rfc1459-strict", or "ascii".
+# Do not change this on a running network: two nicknames that were distinct
+# may become the same one.
+casemapping = "rfc1459"
+
+max_nick_len = 32
+max_channel_len = 64
+max_channels_per_client = 128
+
+# Seconds a connection may stay silent before it is closed.
+idle_timeout_secs = 300
+registration_timeout_secs = 60
+
+# A password every client must supply with PASS, if you want one.
+# password = "..."
+
+# Accounts created at start-up, for bootstrapping a new server.
+# Passwords here are in the clear: fine for getting started, not for running
+# a real network. Nothing persists yet, so accounts are recreated each start.
+# [[accounts]]
+# name = "alice"
+# password = "change-me"

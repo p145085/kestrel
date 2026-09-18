@@ -1,0 +1,31 @@
+[package]
+name = "kestreld"
+description = "The Kestrel IRC server."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "kestreld"
+path = "src/main.rs"
+
+[dependencies]
+kestrel-proto.workspace = true
+kestreld-core.workspace = true
+kestreld-services.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "signal", "time"] }
+serde = { workspace = true, features = ["derive"] }
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+anyhow.workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+
+[lints]
+workspace = true
