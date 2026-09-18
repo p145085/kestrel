@@ -178,9 +178,28 @@ pub enum PeerEvent {
         /// `audio` or `video`.
         kind: String,
     },
+    /// A capture device stopped working.
+    ///
+    /// Reported apart from other failures because it is usually fixable and
+    /// rarely fatal: the call carries on with whatever else it has.
+    CaptureFailed {
+        /// `camera` or `microphone`.
+        what: &'static str,
+        /// What GStreamer said.
+        detail: String,
+    },
     /// Something went wrong.
     Error(String),
 }
+
+/// What the capture elements are called, so a failure can be attributed.
+///
+/// A bus error names the element that raised it, and "mfvideosrc0 reported an
+/// internal data stream error" tells a user nothing they can act on. Knowing
+/// it was the camera does.
+const CAMERA: &str = "kestrel-camera";
+/// As above, for the microphone.
+const MICROPHONE: &str = "kestrel-microphone";
 
 /// Whether a connection is still open, shared with the signal handlers.
 ///
@@ -783,6 +802,9 @@ fn replace_sink(
 
 /// Forward pipeline errors and warnings.
 fn watch_bus(pipeline: &gst::Pipeline, events: &mpsc::UnboundedSender<PeerEvent>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let reported = Arc::new(AtomicBool::new(false));
     let Some(bus) = pipeline.bus() else {
         return;
     };
@@ -792,6 +814,12 @@ fn watch_bus(pipeline: &gst::Pipeline, events: &mpsc::UnboundedSender<PeerEvent>
     // there is not one of here.
     bus.set_sync_handler(move |_, message| {
         match message.view() {
+            gst::MessageView::Error(error) if reported.swap(true, Ordering::Relaxed) => {
+                // GStreamer cascades: one element failing makes its neighbours
+                // fail too. The first is the one worth reporting; the rest are
+                // a description of the wreckage.
+                debug!("further pipeline error: {}", error.error());
+            }
             gst::MessageView::Error(error) => {
                 // Name the element and keep the detail. "Internal data stream
                 // error" on its own says nothing about which part of a
@@ -801,10 +829,21 @@ fn watch_bus(pipeline: &gst::Pipeline, events: &mpsc::UnboundedSender<PeerEvent>
                     |src| src.path_string().to_string(),
                 );
                 let detail = error.debug().map(|d| format!(" ({d})")).unwrap_or_default();
-                let _ = tx.send(PeerEvent::Error(format!(
-                    "{source}: {}{detail}",
-                    error.error()
-                )));
+                let what = if source.contains(CAMERA) {
+                    Some("camera")
+                } else if source.contains(MICROPHONE) {
+                    Some("microphone")
+                } else {
+                    None
+                };
+
+                let _ = tx.send(match what {
+                    Some(what) => PeerEvent::CaptureFailed {
+                        what,
+                        detail: error.error().to_string(),
+                    },
+                    None => PeerEvent::Error(format!("{source}: {}{detail}", error.error())),
+                });
             }
             gst::MessageView::Warning(warning) => {
                 debug!("pipeline warning: {}", warning.error());
@@ -923,6 +962,7 @@ fn add_audio(
             .or_else(|_| gst::ElementFactory::make("autoaudiosrc").build()),
     }
     .map_err(|_| MediaError::MissingElement("audio source"))?;
+    src.set_property("name", MICROPHONE);
 
     let convert = make("audioconvert")?;
     let resample = make("audioresample")?;
@@ -974,6 +1014,7 @@ fn add_video(
         }
     }
     .map_err(|_| MediaError::MissingElement("video source"))?;
+    src.set_property("name", CAMERA);
 
     // Cameras advertise their best format first, and for most webcams that is
     // MJPEG at the highest resolution they manage -- which `videoconvert`

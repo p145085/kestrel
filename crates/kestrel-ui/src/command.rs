@@ -25,7 +25,7 @@ pub enum Action {
 /// Listed here rather than in the interface so the terminal and the window
 /// describe the same commands, and so a command cannot be added without a
 /// visible place to document it.
-const HELP: [&str; 12] = [
+const HELP: [&str; 13] = [
     "/join #channel      join a channel",
     "/part [#channel]    leave a channel, or this one",
     "/msg nick text      send a private message",
@@ -36,6 +36,7 @@ const HELP: [&str; 12] = [
     "/names [#channel]   refresh the member list",
     "/whois nick         ask about somebody",
     "/raw LINE           send a raw IRC line",
+    "/register acc pass  create an account on this server",
     "/quit [reason]      disconnect and leave",
     "//text              say something starting with a slash",
 ];
@@ -176,6 +177,20 @@ pub fn parse(buffer: &str, me: &str, input: &str, echoed: bool) -> Vec<Action> {
             .iter()
             .map(|entry| Action::Show(buffer.to_owned(), Line::status(*entry)))
             .collect(),
+        "register" => {
+            let (account, password) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
+            if account.is_empty() || password.trim().is_empty() {
+                return vec![refuse(buffer, "/register needs an account and a password")];
+            }
+            // The email field is required by the specification and
+            // unused here; `*` is how you decline to give one.
+            vec![Action::Send(Box::new(
+                MessageBuf::new("REGISTER")
+                    .param(account)
+                    .param("*")
+                    .param(password.trim()),
+            ))]
+        }
         "quit" => {
             let reason = if args.is_empty() { "kestrel" } else { args };
             vec![Action::Quit(reason.to_owned())]
@@ -348,6 +363,17 @@ mod tests {
                 .any(|line| line.starts_with("no such command"));
             assert!(!refused, "{verb} is documented but not understood");
         }
+    }
+
+    #[test]
+    fn registering_needs_both_halves() {
+        // Half a registration reaching the server would create an account
+        // whose password the user does not know they did not choose.
+        assert!(sent(&parse("", "me", "/register alice", true)).is_empty());
+        assert_eq!(
+            sent(&parse("", "me", "/register alice secret", true)),
+            ["REGISTER alice * secret\r\n"]
+        );
     }
 
     #[test]

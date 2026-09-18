@@ -28,6 +28,10 @@ pub fn show(app: &gtk::Application, from: Option<window::Window>, options: &Call
     password.set_visibility(false);
     password.set_input_purpose(gtk::InputPurpose::Password);
 
+    // A camera opens once. Two clients on one machine cannot both have it,
+    // and the second one fails in a way that reads like a broken call rather
+    // than a busy device -- so there is a way to say "do not even try".
+    let test_media = gtk::CheckButton::with_label("Use a test picture instead of a camera");
     let tls = gtk::CheckButton::with_label("Connect with TLS");
     let insecure = gtk::CheckButton::with_label("Accept any certificate");
     insecure.set_sensitive(false);
@@ -101,8 +105,9 @@ pub fn show(app: &gtk::Application, from: Option<window::Window>, options: &Call
         1,
         1,
     );
-    grid.attach(&tls, 1, 7, 1, 1);
-    grid.attach(&insecure, 1, 8, 1, 1);
+    grid.attach(&test_media, 1, 7, 1, 1);
+    grid.attach(&tls, 1, 8, 1, 1);
+    grid.attach(&insecure, 1, 9, 1, 1);
 
     let problem = gtk::Label::builder()
         .xalign(0.0)
@@ -110,7 +115,7 @@ pub fn show(app: &gtk::Application, from: Option<window::Window>, options: &Call
         .visible(false)
         .build();
     problem.add_css_class("error");
-    grid.attach(&problem, 0, 9, 2, 1);
+    grid.attach(&problem, 0, 10, 2, 1);
 
     let cancel = gtk::Button::with_label("Cancel");
     let connect = gtk::Button::with_label("Connect");
@@ -120,7 +125,7 @@ pub fn show(app: &gtk::Application, from: Option<window::Window>, options: &Call
     buttons.set_halign(gtk::Align::End);
     buttons.append(&cancel);
     buttons.append(&connect);
-    grid.attach(&buttons, 0, 10, 2, 1);
+    grid.attach(&buttons, 0, 11, 2, 1);
 
     let dialog = gtk::ApplicationWindow::builder()
         .application(app)
@@ -146,13 +151,16 @@ pub fn show(app: &gtk::Application, from: Option<window::Window>, options: &Call
             password: password.clone(),
             tls: tls.clone(),
             insecure: insecure.clone(),
+            test_media: test_media.clone(),
         };
         let problem = problem.clone();
         move || match fields.read() {
             Ok((connect, session)) => {
+                let mut chosen = options.clone();
+                chosen.test_media |= fields.test_media.is_active();
                 let opened = match &reuse {
-                    Some(window) => window.redial(connect, session),
-                    None => window::open(&app, connect, session, options.clone()),
+                    Some(window) => window.redial_with(connect, session, chosen),
+                    None => window::open(&app, connect, session, chosen),
                 };
                 if let Err(error) = opened {
                     problem.set_text(&format!("{error:#}"));
@@ -194,6 +202,7 @@ struct Fields {
     password: gtk::Entry,
     tls: gtk::CheckButton,
     insecure: gtk::CheckButton,
+    test_media: gtk::CheckButton,
 }
 
 impl Fields {

@@ -546,6 +546,19 @@ impl Calls {
             return Ok(());
         };
 
+        // A capture device giving up is not the call giving up. Whatever else
+        // is working keeps working, and the user is told what stopped and the
+        // likeliest reason, rather than being shown a pipeline path.
+        if let PeerEvent::CaptureFailed { what, detail } = &event {
+            self.warn_about(
+                &peer,
+                format!(
+                    "your {what} stopped working ({detail}). It is probably in use by                      another program -- the call continues without it"
+                ),
+            );
+            return Ok(());
+        }
+
         let translated = match event {
             PeerEvent::LocalDescription { kind, sdp } => MediaEvent::LocalDescription {
                 peer: peer.clone(),
@@ -590,7 +603,8 @@ impl Calls {
                 self.offer_if_ready(&call_id, &peer);
                 return Ok(());
             }
-            PeerEvent::IceState(_) => return Ok(()),
+            // Already dealt with above, and not worth relaying onwards.
+            PeerEvent::CaptureFailed { .. } | PeerEvent::IceState(_) => return Ok(()),
         };
 
         let Some(entry) = self.active.get_mut(&call_id) else {

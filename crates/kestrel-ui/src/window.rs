@@ -10,6 +10,7 @@ use std::rc::Rc;
 
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
+use kestrel_media::gstreamer::prelude::{ElementExt, PadExtManual};
 use kestrel_net::ConnectConfig;
 use kestrel_session::SessionConfig;
 use kestrel_ui::connection::CallOptions;
@@ -205,6 +206,27 @@ impl Window {
         ui.show_buffer(SERVER_BUFFER);
         ui.connect_signals();
 
+        // Tab is how focus moves, and the focus handling sees it before any
+        // accelerator does. Watching for it on the way down is the only way to
+        // claim it, so the accelerators above are for the menu to display and
+        // this is what actually works.
+        let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let cycling = ui.clone();
+        keys.connect_key_pressed(move |_, key, _, modifiers| {
+            if key != gdk::Key::Tab && key != gdk::Key::ISO_Left_Tab {
+                return glib::Propagation::Proceed;
+            }
+            if !modifiers.contains(gdk::ModifierType::CONTROL_MASK) {
+                return glib::Propagation::Proceed;
+            }
+            let back =
+                modifiers.contains(gdk::ModifierType::SHIFT_MASK) || key == gdk::Key::ISO_Left_Tab;
+            cycling.cycle_buffer(if back { -1 } else { 1 });
+            glib::Propagation::Stop
+        });
+        window.add_controller(keys);
+
         window.present();
         (ui, window)
     }
@@ -341,6 +363,35 @@ impl Window {
         drop(state);
 
         self.rebuild_sidebar();
+    }
+
+    /// Move to the next buffer along, wrapping at the end.
+    ///
+    /// `step` is 1 for forwards and -1 for back. Wrapping rather than stopping
+    /// because a list of four buffers is not somewhere you want to notice an
+    /// edge.
+    fn cycle_buffer(&self, step: isize) {
+        let next = {
+            let state = self.state.borrow();
+            if state.order.len() < 2 {
+                return;
+            }
+            let at = state
+                .order
+                .iter()
+                .position(|name| name == &state.current)
+                .unwrap_or(0);
+            let count = isize::try_from(state.order.len()).unwrap_or(1);
+            let index = (isize::try_from(at).unwrap_or(0) + step).rem_euclid(count);
+            state
+                .order
+                .get(usize::try_from(index).unwrap_or(0))
+                .cloned()
+        };
+
+        if let Some(next) = next {
+            self.show_buffer(&next);
+        }
     }
 
     /// Bring a buffer forward.
@@ -613,6 +664,9 @@ impl Window {
             }
         });
 
+        self.add_action(window, "next-buffer", |ui| ui.cycle_buffer(1));
+        self.add_action(window, "previous-buffer", |ui| ui.cycle_buffer(-1));
+
         self.add_action(window, "answer", |ui| ui.call(CallAction::Answer));
         self.add_action(window, "reject", |ui| ui.call(CallAction::Reject));
         self.add_action(window, "hangup", |ui| ui.call(CallAction::HangUp));
@@ -654,6 +708,8 @@ impl Window {
         }
 
         for (action, keys) in [
+            ("win.next-buffer", "<Ctrl>Tab"),
+            ("win.previous-buffer", "<Ctrl><Shift>Tab"),
             ("win.connect", "<Ctrl>n"),
             ("win.join", "<Ctrl>j"),
             ("win.query", "<Ctrl>q"),
@@ -843,6 +899,36 @@ impl Window {
             return;
         };
 
+        // Counted so that "I see a black box" can be told apart from "no
+        // video is arriving at all" without anyone having to guess.
+        let frames = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        if let Some(pad) = sink.static_pad("sink") {
+            let counted = std::sync::Arc::clone(&frames);
+            pad.add_probe(
+                kestrel_media::gstreamer::PadProbeType::BUFFER,
+                move |_, _| {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    kestrel_media::gstreamer::PadProbeReturn::Ok
+                },
+            );
+        }
+
+        // Checked from the interface's own thread a few seconds later: a probe
+        // runs on a streaming thread and must not go near a widget.
+        let ui = self.clone();
+        let who = peer.to_owned();
+        glib::timeout_add_seconds_local_once(5, move || {
+            let seen = frames.load(std::sync::atomic::Ordering::Relaxed);
+            if seen == 0 {
+                ui.append(
+                    SERVER_BUFFER,
+                    &Line::error(format!(
+                        "no video has arrived from {who}; the picture will stay blank"
+                    )),
+                );
+            }
+        });
+
         let paintable: gdk::Paintable = sink.property("paintable");
         let picture = gtk::Picture::builder()
             .paintable(&paintable)
@@ -969,14 +1055,24 @@ impl Window {
     /// said before the connection dropped is usually what you want to see
     /// after it comes back.
     pub fn redial(&self, connect: ConnectConfig, session: SessionConfig) -> anyhow::Result<()> {
-        let options = self.call_options();
+        self.redial_with(connect, session, self.call_options())
+    }
+
+    /// The same, choosing afresh how media is captured.
+    pub fn redial_with(
+        &self,
+        connect: ConnectConfig,
+        session: SessionConfig,
+        options: CallOptions,
+    ) -> anyhow::Result<()> {
         let (commands, events) =
-            kestrel_ui::connection::start(connect.clone(), session.clone(), options)?;
+            kestrel_ui::connection::start(connect.clone(), session.clone(), options.clone())?;
         *self.commands.borrow_mut() = commands;
         {
             let mut state = self.state.borrow_mut();
             state.connected = true;
             state.last = Some((connect, session));
+            state.call_options = options;
         }
 
         self.entry.set_sensitive(true);
@@ -1008,7 +1104,9 @@ impl Window {
 /// Named in one place so a menu entry pointing at an action nobody installed
 /// cannot slip through: GTK renders such an entry greyed out and says nothing,
 /// which looks exactly like a feature that is merely unavailable.
-const ACTIONS: [&str; 15] = [
+const ACTIONS: [&str; 17] = [
+    "next-buffer",
+    "previous-buffer",
     "connect",
     "reconnect",
     "verify",
@@ -1051,6 +1149,10 @@ fn menu_model() -> gio::Menu {
     call.append(Some("Confirm Spoken Phrase"), Some("win.verify"));
     call.append(Some("Hang Up"), Some("win.hangup"));
 
+    let buffers = gio::Menu::new();
+    buffers.append(Some("Next"), Some("win.next-buffer"));
+    buffers.append(Some("Previous"), Some("win.previous-buffer"));
+
     let help = gio::Menu::new();
     help.append(Some("About Kestrel"), Some("win.about"));
 
@@ -1058,6 +1160,7 @@ fn menu_model() -> gio::Menu {
     bar.append_submenu(Some("Server"), &server);
     bar.append_submenu(Some("Channel"), &channel);
     bar.append_submenu(Some("Call"), &call);
+    bar.append_submenu(Some("Buffers"), &buffers);
     bar.append_submenu(Some("Help"), &help);
     bar
 }

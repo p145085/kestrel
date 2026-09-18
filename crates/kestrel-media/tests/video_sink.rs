@@ -72,6 +72,11 @@ fn handle(
         } => peer.add_ice_candidate(mline_index, &candidate),
         PeerEvent::ConnectionState(state) => *connected = state.is_connected(),
         PeerEvent::Error(error) => errors.push(error),
+        // A capture device failing would make a test pass while the call
+        // it claims to prove carried nothing, so it is an error here.
+        PeerEvent::CaptureFailed { what, detail } => {
+            errors.push(format!("the {what} failed: {detail}"));
+        }
         PeerEvent::IceState(_) | PeerEvent::RemoteTrack { .. } => {}
     }
 }

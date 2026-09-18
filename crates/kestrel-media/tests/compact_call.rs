@@ -65,6 +65,9 @@ fn handle(
         PeerEvent::ConnectionState(state) => *connected = state.is_connected(),
         PeerEvent::Error(error) => errors.push(error),
         PeerEvent::RemoteTrack { kind } => tracks.push(kind),
+        PeerEvent::CaptureFailed { what, detail } => {
+            errors.push(format!("the {what} failed: {detail}"));
+        }
         PeerEvent::IceState(_) => {}
     }
 }

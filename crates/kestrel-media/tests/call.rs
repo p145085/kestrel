@@ -87,6 +87,13 @@ fn handle(
             *connected = state.is_connected();
         }
         PeerEvent::Error(error) => panic!("pipeline failed: {error}"),
+        // A capture device failing would make a test pass while the call
+        // it claims to prove carried nothing, so it is an error here.
+        // A capture device failing would make a test pass while the call it
+        // claims to prove carried nothing, so it fails loudly here.
+        PeerEvent::CaptureFailed { what, detail } => {
+            panic!("the {what} failed: {detail}");
+        }
         PeerEvent::IceState(_) | PeerEvent::RemoteTrack { .. } => {}
     }
 }
