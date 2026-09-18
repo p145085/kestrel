@@ -20,6 +20,26 @@ pub enum Action {
     Quit(String),
 }
 
+/// What `/help` prints.
+///
+/// Listed here rather than in the interface so the terminal and the window
+/// describe the same commands, and so a command cannot be added without a
+/// visible place to document it.
+const HELP: [&str; 12] = [
+    "/join #channel      join a channel",
+    "/part [#channel]    leave a channel, or this one",
+    "/msg nick text      send a private message",
+    "/query nick         open a conversation without sending anything",
+    "/nick name          change your nickname",
+    "/me does something  say something in the third person",
+    "/topic [text]       show or set the channel topic",
+    "/names [#channel]   refresh the member list",
+    "/whois nick         ask about somebody",
+    "/raw LINE           send a raw IRC line",
+    "/quit [reason]      disconnect and leave",
+    "//text              say something starting with a slash",
+];
+
 /// Whether a name is a channel rather than a nickname.
 fn is_channel(name: &str) -> bool {
     name.starts_with('#') || name.starts_with('&')
@@ -152,6 +172,10 @@ pub fn parse(buffer: &str, me: &str, input: &str, echoed: bool) -> Vec<Action> {
                 Err(_) => vec![refuse(buffer, "that is not a valid IRC line")],
             }
         }
+        "help" => HELP
+            .iter()
+            .map(|entry| Action::Show(buffer.to_owned(), Line::status(*entry)))
+            .collect(),
         "quit" => {
             let reason = if args.is_empty() { "kestrel" } else { args };
             vec![Action::Quit(reason.to_owned())]
@@ -290,6 +314,40 @@ mod tests {
             ["a raw line cannot contain a line break"],
             "and the user is told why, rather than it failing at send time"
         );
+    }
+
+    #[test]
+    fn help_lists_the_commands_and_is_not_itself_unknown() {
+        // The entry box advertises /help, so it not existing was worse than a
+        // missing feature: it was the client contradicting itself.
+        let actions = parse("#rust", "me", "/help", true);
+        assert!(sent(&actions).is_empty(), "help is answered locally");
+
+        let shown = shown(&actions);
+        assert_eq!(shown.len(), HELP.len());
+        for command in ["/join", "/part", "/msg", "/nick", "/me", "/quit"] {
+            assert!(
+                shown.iter().any(|line| line.starts_with(command)),
+                "{command} is not documented"
+            );
+        }
+    }
+
+    #[test]
+    fn every_documented_command_is_understood() {
+        // A help text that lists something the parser rejects is worse than no
+        // help at all, so the two are checked against each other.
+        for entry in HELP {
+            let verb = entry.split_whitespace().next().expect("an entry");
+            if verb == "//text" {
+                continue;
+            }
+            let actions = parse("#rust", "me", verb, true);
+            let refused = shown(&actions)
+                .iter()
+                .any(|line| line.starts_with("no such command"));
+            assert!(!refused, "{verb} is documented but not understood");
+        }
     }
 
     #[test]

@@ -86,7 +86,33 @@ pub fn prompt_password(prompt: &str) -> Result<String> {
     Ok(line.trim_end_matches(['\r', '\n']).to_owned())
 }
 
+/// What `/help` prints.
+///
+/// A client that answers `/help` with "no such command" is telling the
+/// user it has nothing to offer, which is the opposite of the truth.
+const HELP: [&str; 16] = [
+    "/join #channel      join a channel",
+    "/part [#channel]    leave a channel",
+    "/msg nick text      send a private message",
+    "/target #channel    choose where plain text goes (/t)",
+    "/nick name          change your nickname",
+    "/me does something  say something in the third person",
+    "/topic [text]       show or set the channel topic",
+    "/names [#channel]   list the members of a channel",
+    "/whois nick         ask about somebody",
+    "/raw LINE           send a raw IRC line",
+    "/call nick|#channel start a call",
+    "/answer             accept an incoming call",
+    "/reject             decline an incoming call",
+    "/hangup             leave the call",
+    "/verify             confirm the spoken phrase matched",
+    "/quit [reason]      disconnect and leave",
+];
+
 /// Act on one line the user typed.
+///
+/// One arm per command: long, but flat, and splitting it would scatter the
+/// vocabulary across several functions for no gain in clarity.
 #[allow(clippy::too_many_lines)]
 pub fn handle_input(
     line: &str,
@@ -134,6 +160,11 @@ pub fn handle_input(
     };
 
     match command.to_ascii_lowercase().as_str() {
+        "help" | "h" => {
+            for entry in HELP {
+                status(entry);
+            }
+        }
         "join" | "j" => {
             if argument.is_empty() {
                 bail!("usage: /join #channel");

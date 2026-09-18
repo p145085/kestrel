@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use gtk::prelude::*;
-use gtk::{gdk, glib};
+use gtk::{gdk, gio, glib};
 use kestrel_ui::event::{AppEvent, BufferId, Line, LineKind, SERVER_BUFFER, UiCommand};
 use tokio::sync::mpsc;
 
@@ -128,12 +128,16 @@ impl Window {
         row.append(&gtk::Separator::new(gtk::Orientation::Vertical));
         row.append(&members_pane);
 
+        let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        outer.append(&gtk::PopoverMenuBar::from_model(Some(&menu_model())));
+        outer.append(&row);
+
         let window = gtk::ApplicationWindow::builder()
             .application(app)
             .title("Kestrel")
             .default_width(980)
             .default_height(620)
-            .child(&row)
+            .child(&outer)
             .build();
 
         let ui = Self {
@@ -156,6 +160,7 @@ impl Window {
 
         // The server buffer always exists: it is where anything that belongs
         // to no conversation goes, including the reason a connection failed.
+        ui.install_actions(app, &window);
         ui.ensure_buffer(SERVER_BUFFER);
         ui.show_buffer(SERVER_BUFFER);
         ui.connect_signals();
@@ -286,6 +291,7 @@ impl Window {
         self.redraw_members();
         self.redraw_topic();
         self.retitle();
+        self.update_actions();
         self.scroll_to_end();
         self.entry.grab_focus();
     }
@@ -482,12 +488,272 @@ impl Window {
         window.set_title(Some(&title));
     }
 
+    /// Wire the menu up.
+    ///
+    /// Every entry goes through the same command parsing as typing the
+    /// equivalent slash command, so there is one implementation of what
+    /// joining a channel means rather than two that can drift apart.
+    fn install_actions(&self, app: &gtk::Application, window: &gtk::ApplicationWindow) {
+        self.add_prompt_action(window, "join", "Join Channel", "Channel", "#", |name| {
+            format!("/join {name}")
+        });
+        self.add_prompt_action(
+            window,
+            "query",
+            "Open Conversation",
+            "Nickname",
+            "",
+            |who| format!("/query {who}"),
+        );
+        self.add_prompt_action(window, "nick", "Change Nickname", "Nickname", "", |nick| {
+            format!("/nick {nick}")
+        });
+        self.add_prompt_action(window, "topic", "Set Topic", "Topic", "", |topic| {
+            format!("/topic {topic}")
+        });
+
+        self.add_action(window, "names", |ui| ui.run("/names"));
+        self.add_action(window, "part", |ui| ui.run("/part"));
+        self.add_action(window, "disconnect", Self::quit);
+        self.add_action(window, "about", Self::show_about);
+
+        // Anything the menu names but nothing above installed becomes a
+        // disabled placeholder. That is how the call entries behave today:
+        // visible, so the shape of what is coming is apparent, and plainly
+        // unavailable rather than silently doing nothing when clicked.
+        for name in ACTIONS {
+            if window.lookup_action(name).is_none() {
+                let action = gio::SimpleAction::new(name, None);
+                action.set_enabled(false);
+                window.add_action(&action);
+            }
+        }
+
+        for (action, keys) in [
+            ("win.join", "<Ctrl>j"),
+            ("win.query", "<Ctrl>q"),
+            ("win.part", "<Ctrl>w"),
+            ("win.disconnect", "<Ctrl>Q"),
+        ] {
+            app.set_accels_for_action(action, &[keys]);
+        }
+
+        self.update_actions();
+    }
+
+    /// Add an action that does something immediately.
+    fn add_action(
+        &self,
+        window: &gtk::ApplicationWindow,
+        name: &str,
+        run: impl Fn(&Self) + 'static,
+    ) {
+        let action = gio::SimpleAction::new(name, None);
+        let ui = self.clone();
+        action.connect_activate(move |_, _| run(&ui));
+        window.add_action(&action);
+    }
+
+    /// Add an action that asks for something first.
+    fn add_prompt_action(
+        &self,
+        window: &gtk::ApplicationWindow,
+        name: &str,
+        title: &str,
+        label: &str,
+        initial: &str,
+        to_command: impl Fn(&str) -> String + 'static,
+    ) {
+        let action = gio::SimpleAction::new(name, None);
+        let ui = self.clone();
+        let title = title.to_owned();
+        let label = label.to_owned();
+        let initial = initial.to_owned();
+        // Shared rather than borrowed: the answer arrives long after this
+        // handler has returned, so what turns it into a command has to outlive
+        // the handler that asked the question.
+        let to_command = std::rc::Rc::new(to_command);
+        action.connect_activate(move |_, _| {
+            let target = ui.clone();
+            let to_command = std::rc::Rc::clone(&to_command);
+            ui.prompt(&title, &label, &initial, move |answer| {
+                target.run(&to_command(&answer));
+            });
+        });
+        window.add_action(&action);
+    }
+
+    /// Grey out what does not apply to the buffer on screen.
+    fn update_actions(&self) {
+        let Some(window) = self.window() else { return };
+        let current = self.state.borrow().current.clone();
+        let in_channel = current.starts_with('#') || current.starts_with('&');
+
+        for name in ["part", "topic", "names"] {
+            if let Some(action) = window
+                .lookup_action(name)
+                .and_downcast::<gio::SimpleAction>()
+            {
+                action.set_enabled(in_channel);
+            }
+        }
+    }
+
+    /// Ask a one-line question, then do something with the answer.
+    fn prompt(&self, title: &str, label: &str, initial: &str, accept: impl Fn(String) + 'static) {
+        let Some(parent) = self.window() else { return };
+
+        let entry = gtk::Entry::builder().text(initial).hexpand(true).build();
+        entry.set_position(-1);
+
+        let cancel = gtk::Button::with_label("Cancel");
+        let confirm = gtk::Button::with_label("OK");
+        confirm.add_css_class("suggested-action");
+
+        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        buttons.set_halign(gtk::Align::End);
+        buttons.append(&cancel);
+        buttons.append(&confirm);
+
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        content.set_margin_top(12);
+        content.set_margin_bottom(12);
+        content.set_margin_start(12);
+        content.set_margin_end(12);
+        content.append(&gtk::Label::builder().label(label).xalign(0.0).build());
+        content.append(&entry);
+        content.append(&buttons);
+
+        let dialog = gtk::Window::builder()
+            .transient_for(&parent)
+            .modal(true)
+            .title(title)
+            .default_width(320)
+            .resizable(false)
+            .child(&content)
+            .build();
+
+        // Shared so that Enter, the button and the closing of the window all
+        // go through one path; `accept` may only be called once.
+        let accept = std::rc::Rc::new(std::cell::RefCell::new(Some(accept)));
+
+        let finish = {
+            let dialog = dialog.clone();
+            let entry = entry.clone();
+            let accept = std::rc::Rc::clone(&accept);
+            move || {
+                let answer = entry.text().to_string();
+                if let Some(accept) = accept.borrow_mut().take()
+                    && !answer.trim().is_empty()
+                {
+                    accept(answer.trim().to_owned());
+                }
+                dialog.close();
+            }
+        };
+
+        let on_confirm = finish.clone();
+        confirm.connect_clicked(move |_| on_confirm());
+        let on_activate = finish;
+        entry.connect_activate(move |_| on_activate());
+
+        let closing = dialog.clone();
+        cancel.connect_clicked(move |_| closing.close());
+
+        dialog.present();
+        entry.grab_focus();
+    }
+
+    fn show_about(&self) {
+        let detail = concat!(
+            "An IRC client with native audio and video conferencing.\n\n",
+            "Version ",
+            env!("CARGO_PKG_VERSION"),
+            "\nGPL-3.0-or-later\n",
+            "https://github.com/p145085/kestrel"
+        );
+        let dialog = gtk::AlertDialog::builder()
+            .message("Kestrel")
+            .detail(detail)
+            .build();
+        dialog.show(self.window().as_ref());
+    }
+
+    /// Put something through the same path as typing it.
+    fn run(&self, input: &str) {
+        let buffer = self.state.borrow().current.clone();
+        let _ = self.commands.send(UiCommand::Input {
+            buffer,
+            text: input.to_owned(),
+        });
+    }
+
+    /// The window these widgets are in, once it exists.
+    ///
+    /// Looked up rather than held, because a handler that holds the window
+    /// while the window holds the handler is a reference cycle, and GTK's
+    /// objects are reference counted.
+    fn window(&self) -> Option<gtk::ApplicationWindow> {
+        self.view.root().and_downcast::<gtk::ApplicationWindow>()
+    }
+
     /// Ask the connection to leave.
     pub fn quit(&self) {
         let _ = self.commands.send(UiCommand::Quit {
             reason: "kestrel".to_owned(),
         });
     }
+}
+
+/// Every action the menu may refer to.
+///
+/// Named in one place so a menu entry pointing at an action nobody installed
+/// cannot slip through: GTK renders such an entry greyed out and says nothing,
+/// which looks exactly like a feature that is merely unavailable.
+const ACTIONS: [&str; 11] = [
+    "join",
+    "query",
+    "nick",
+    "topic",
+    "names",
+    "part",
+    "disconnect",
+    "about",
+    "call",
+    "answer",
+    "hangup",
+];
+
+/// The menu bar's contents.
+///
+/// A menu rather than only slash commands: the commands are faster once known,
+/// but nothing in a text box tells a new user that any of this exists.
+fn menu_model() -> gio::Menu {
+    let server = gio::Menu::new();
+    server.append(Some("Join Channel…"), Some("win.join"));
+    server.append(Some("Open Conversation…"), Some("win.query"));
+    server.append(Some("Change Nickname…"), Some("win.nick"));
+    server.append(Some("Disconnect"), Some("win.disconnect"));
+
+    let channel = gio::Menu::new();
+    channel.append(Some("Set Topic…"), Some("win.topic"));
+    channel.append(Some("Refresh Members"), Some("win.names"));
+    channel.append(Some("Leave Channel"), Some("win.part"));
+
+    let call = gio::Menu::new();
+    call.append(Some("Start Call…"), Some("win.call"));
+    call.append(Some("Answer"), Some("win.answer"));
+    call.append(Some("Hang Up"), Some("win.hangup"));
+
+    let help = gio::Menu::new();
+    help.append(Some("About Kestrel"), Some("win.about"));
+
+    let bar = gio::Menu::new();
+    bar.append_submenu(Some("Server"), &server);
+    bar.append_submenu(Some("Channel"), &channel);
+    bar.append_submenu(Some("Call"), &call);
+    bar.append_submenu(Some("Help"), &help);
+    bar
 }
 
 /// Which tag paints the name at the start of a line.
@@ -550,4 +816,58 @@ pub fn pump(ui: Window, events: async_channel::Receiver<AppEvent>) {
             ui.handle(event);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ACTIONS, menu_model};
+    use gtk::gio;
+    use gtk::prelude::*;
+
+    /// Every action name the menu refers to, submenus included.
+    fn referenced(model: &gio::MenuModel, into: &mut Vec<String>) {
+        for index in 0..model.n_items() {
+            if let Some(action) = model
+                .item_attribute_value(index, "action", None)
+                .and_then(|value| value.str().map(str::to_owned))
+            {
+                into.push(action);
+            }
+            if let Some(submenu) = model.item_link(index, "submenu") {
+                referenced(&submenu, into);
+            }
+        }
+    }
+
+    #[test]
+    fn every_menu_entry_points_at_an_action_that_exists() {
+        let mut found = Vec::new();
+        referenced(menu_model().upcast_ref(), &mut found);
+
+        assert!(!found.is_empty(), "the menu model produced nothing");
+        for action in &found {
+            let name = action
+                .strip_prefix("win.")
+                .unwrap_or_else(|| panic!("{action} is not a window action"));
+            assert!(
+                ACTIONS.contains(&name),
+                "the menu refers to {name}, which is never installed"
+            );
+        }
+    }
+
+    #[test]
+    fn every_action_is_reachable_from_the_menu() {
+        // The other direction: an action nobody can invoke is dead code that
+        // looks like a feature.
+        let mut found = Vec::new();
+        referenced(menu_model().upcast_ref(), &mut found);
+
+        for name in ACTIONS {
+            assert!(
+                found.iter().any(|action| action == &format!("win.{name}")),
+                "{name} is installed but appears in no menu"
+            );
+        }
+    }
 }

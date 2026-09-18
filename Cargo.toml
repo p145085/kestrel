@@ -31,7 +31,7 @@ kestrel-rtc-proto = { path = "crates/kestrel-rtc-proto" }
 kestrel-session = { path = "crates/kestrel-session" }
 kestrel-media = { path = "crates/kestrel-media" }
 kestrel-net = { path = "crates/kestrel-net" }
-gtk = { package = "gtk4", version = "0.11" }
+gtk = { package = "gtk4", version = "0.11", features = ["v4_10"] }
 async-channel = "2"
 kestreld-core = { path = "crates/kestreld-core" }
 kestreld-services = { path = "crates/kestreld-services" }

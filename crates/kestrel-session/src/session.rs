@@ -474,11 +474,15 @@ impl Session {
         // The first parameter is always our own nickname; a UI does not need
         // to be told its own name on every reply.
         let params: Vec<Vec<u8>> = msg.params().iter().skip(1).map(|p| (*p).to_vec()).collect();
-        out.emit(Event::Numeric {
-            code,
-            params,
-            text: msg.params().last().map(|t| (*t).to_vec()),
-        });
+        // Only when the line actually used the trailing form. Reporting the
+        // last parameter regardless would make every numeric appear to carry
+        // free text, and a client showing both the parameters and the text
+        // would print that text twice.
+        let text = msg
+            .has_trailing_param()
+            .then(|| msg.params().last().map(|t| (*t).to_vec()))
+            .flatten();
+        out.emit(Event::Numeric { code, params, text });
     }
 
     fn try_next_nick(&mut self, out: &mut Outcome) {

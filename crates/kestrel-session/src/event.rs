@@ -246,8 +246,15 @@ pub enum Event {
         /// The three-digit code.
         code: u16,
         /// The parameters, minus the leading nickname.
+        ///
+        /// Includes the trailing parameter, when there is one, so a client
+        /// that wants the whole reply can simply join these.
         params: Vec<Vec<u8>>,
-        /// The trailing text, when there was one.
+        /// The trailing text, when the line used the trailing form.
+        ///
+        /// This is the last of `params`, offered separately for clients that
+        /// want to show the free text differently from the fixed parameters.
+        /// Showing both without dropping the last parameter prints it twice.
         text: Option<Vec<u8>>,
     },
     /// A message the session did not recognise, passed through unchanged.

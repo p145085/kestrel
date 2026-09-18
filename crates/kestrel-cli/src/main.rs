@@ -297,7 +297,18 @@ async fn main() -> Result<()> {
             }
         }
     }
-    Ok(())
+
+    // Any call is closed deliberately rather than left to the process going
+    // away, so the camera light goes out when the user expects it to.
+    drop(calls);
+
+    // Exiting rather than returning. Reading the terminal is a blocking
+    // operation on a thread of its own, and dropping the runtime waits for
+    // blocking work to finish -- but that read only finishes when the user
+    // types something, which after /quit they never will. Returning here
+    // leaves the process alive until it is killed, which is what the user
+    // sees as a client that will not close.
+    std::process::exit(0);
 }
 
 async fn wait_for_interrupt() {

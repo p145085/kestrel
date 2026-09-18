@@ -4,6 +4,8 @@
 //! which buffer a line belongs in is the part most worth testing, and it needs
 //! neither a socket nor a display to exercise.
 
+use std::collections::HashMap;
+
 use kestrel_session::event::{Ended, Event, MessageKind, Sender, Target};
 
 use crate::event::{AppEvent, BufferId, Line, SERVER_BUFFER};
@@ -16,6 +18,22 @@ use crate::event::{AppEvent, BufferId, Line, SERVER_BUFFER};
 #[derive(Debug, Default)]
 pub struct Translator {
     me: String,
+    /// Who is in each channel, as last known.
+    ///
+    /// Kept here rather than asked for, because the server announces every
+    /// change and only sends a full list when one is requested. A member list
+    /// that is only refreshed by `NAMES` goes stale the moment anyone joins,
+    /// leaves or changes nickname.
+    rosters: HashMap<BufferId, Vec<String>>,
+}
+
+/// Strip the membership prefixes a name may be listed with.
+///
+/// The roster stores names as the server presents them, `@alice` and all, so
+/// matching one against a bare nickname has to ignore the prefix -- while
+/// changing an entry has to keep it.
+fn without_prefix(name: &str) -> &str {
+    name.trim_start_matches(['~', '&', '@', '%', '+'])
 }
 
 impl Translator {
@@ -89,7 +107,11 @@ impl Translator {
                         ),
                     ]
                 } else {
-                    vec![line(buffer, Line::status(format!("{nick} joined")))]
+                    let mut out =
+                        vec![line(buffer.clone(), Line::status(format!("{nick} joined")))];
+                    self.rosters.entry(buffer.clone()).or_default().push(nick);
+                    out.extend(self.roster_of(&buffer));
+                    out
                 }
             }
             Event::Parted {
@@ -100,13 +122,20 @@ impl Translator {
             } => {
                 let buffer = text(&channel);
                 if is_self {
+                    self.rosters.remove(&buffer);
                     return vec![AppEvent::CloseBuffer { buffer }];
                 }
                 let nick = text(&who.nick);
                 let why = reason
                     .map(|r| format!(" ({})", text(&r)))
                     .unwrap_or_default();
-                vec![line(buffer, Line::status(format!("{nick} left{why}")))]
+                let mut out = vec![line(
+                    buffer.clone(),
+                    Line::status(format!("{nick} left{why}")),
+                )];
+                self.remove_member(&buffer, &nick);
+                out.extend(self.roster_of(&buffer));
+                out
             }
             Event::Quit {
                 who,
@@ -117,15 +146,17 @@ impl Translator {
                 let why = reason
                     .map(|r| format!(" ({})", text(&r)))
                     .unwrap_or_default();
-                channels
-                    .into_iter()
-                    .map(|channel| {
-                        line(
-                            text(&channel),
-                            Line::status(format!("{nick} disconnected{why}")),
-                        )
-                    })
-                    .collect()
+                let mut out = Vec::new();
+                for channel in channels {
+                    let buffer = text(&channel);
+                    out.push(line(
+                        buffer.clone(),
+                        Line::status(format!("{nick} disconnected{why}")),
+                    ));
+                    self.remove_member(&buffer, &nick);
+                    out.extend(self.roster_of(&buffer));
+                }
+                out
             }
             Event::Kicked {
                 channel,
@@ -149,11 +180,11 @@ impl Translator {
                 if is_self {
                     // Kept open, unlike a part: the user did not choose this,
                     // and closing the buffer would take the reason with it.
-                    out.push(AppEvent::Roster {
-                        buffer,
-                        members: Vec::new(),
-                    });
+                    self.rosters.insert(buffer.clone(), Vec::new());
+                } else {
+                    self.remove_member(&buffer, &target);
                 }
+                out.extend(self.roster_of(&buffer));
                 out
             }
             Event::NickChanged {
@@ -170,10 +201,13 @@ impl Translator {
                     format!("{old} is now {new}")
                 };
 
-                let mut out: Vec<AppEvent> = channels
-                    .into_iter()
-                    .map(|channel| line(text(&channel), Line::status(said.clone())))
-                    .collect();
+                let mut out: Vec<AppEvent> = Vec::new();
+                for channel in channels {
+                    let buffer = text(&channel);
+                    out.push(line(buffer.clone(), Line::status(said.clone())));
+                    self.rename_member(&buffer, &old, &new);
+                    out.extend(self.roster_of(&buffer));
+                }
                 if is_self {
                     self.me.clone_from(&new);
                     out.push(AppEvent::NickChanged { nick: new });
@@ -208,10 +242,12 @@ impl Translator {
                     line(buffer, Line::status(said)),
                 ]
             }
-            Event::Names { channel, members } => vec![AppEvent::Roster {
-                buffer: text(&channel),
-                members: members.iter().map(|m| text(m)).collect(),
-            }],
+            Event::Names { channel, members } => {
+                let buffer = text(&channel);
+                let members: Vec<String> = members.iter().map(|m| text(m)).collect();
+                self.rosters.insert(buffer.clone(), members.clone());
+                vec![AppEvent::Roster { buffer, members }]
+            }
             Event::ModeChanged {
                 target,
                 spec,
@@ -257,8 +293,16 @@ impl Translator {
                 params,
                 text: body,
             } => {
+                // The trailing text is also the last parameter, so showing
+                // both means dropping it from the parameters first.
+                let fixed = if body.is_some() {
+                    params.split_last().map_or(&[][..], |(_, rest)| rest)
+                } else {
+                    &params[..]
+                };
+
                 let mut said = String::new();
-                for param in &params {
+                for param in fixed {
                     said.push_str(&text(param));
                     said.push(' ');
                 }
@@ -291,6 +335,35 @@ impl Translator {
             | Event::TagMessage { .. }
             | Event::RosterChanged { .. }
             | Event::Raw(_) => Vec::new(),
+        }
+    }
+
+    /// The current membership of a channel, as an event.
+    fn roster_of(&self, buffer: &str) -> Option<AppEvent> {
+        self.rosters.get(buffer).map(|members| AppEvent::Roster {
+            buffer: buffer.to_owned(),
+            members: members.clone(),
+        })
+    }
+
+    fn remove_member(&mut self, buffer: &str, nick: &str) {
+        if let Some(members) = self.rosters.get_mut(buffer) {
+            members.retain(|member| without_prefix(member) != nick);
+        }
+    }
+
+    /// Rename somebody, keeping whatever prefix they held.
+    fn rename_member(&mut self, buffer: &str, old: &str, new: &str) {
+        let Some(members) = self.rosters.get_mut(buffer) else {
+            return;
+        };
+        for member in members.iter_mut() {
+            if without_prefix(member) == old {
+                let prefix_len = member.len() - without_prefix(member).len();
+                let mut renamed = member[..prefix_len].to_owned();
+                renamed.push_str(new);
+                *member = renamed;
+            }
         }
     }
 
@@ -502,6 +575,131 @@ mod tests {
                 .any(|event| matches!(event, AppEvent::Line { .. })),
             "it would otherwise happen silently"
         );
+    }
+
+    fn roster_after(events: &[AppEvent], channel: &str) -> Option<Vec<String>> {
+        events.iter().rev().find_map(|event| match event {
+            AppEvent::Roster { buffer, members } if buffer == channel => Some(members.clone()),
+            _ => None,
+        })
+    }
+
+    fn in_channel(translator: &mut Translator, channel: &str, members: &[&str]) {
+        translator.translate(Event::Names {
+            channel: channel.as_bytes().to_vec(),
+            members: members.iter().map(|m| m.as_bytes().to_vec()).collect(),
+        });
+    }
+
+    #[test]
+    fn a_nick_change_updates_the_member_list() {
+        let mut translator = registered("me");
+        in_channel(&mut translator, "#rust", &["@alice", "bob"]);
+
+        let events = translator.translate(Event::NickChanged {
+            old: b"bob".to_vec(),
+            new: b"robert".to_vec(),
+            channels: vec![b"#rust".to_vec()],
+            is_self: false,
+        });
+
+        assert_eq!(
+            roster_after(&events, "#rust"),
+            Some(vec!["@alice".to_owned(), "robert".to_owned()]),
+            "the member list has to follow the rename, not wait for a NAMES"
+        );
+    }
+
+    #[test]
+    fn a_rename_keeps_whatever_prefix_the_member_held() {
+        let mut translator = registered("me");
+        in_channel(&mut translator, "#rust", &["@alice"]);
+
+        let events = translator.translate(Event::NickChanged {
+            old: b"alice".to_vec(),
+            new: b"alicia".to_vec(),
+            channels: vec![b"#rust".to_vec()],
+            is_self: false,
+        });
+
+        // Losing the @ would silently demote an operator in the display.
+        assert_eq!(
+            roster_after(&events, "#rust"),
+            Some(vec!["@alicia".to_owned()])
+        );
+    }
+
+    #[test]
+    fn joining_and_leaving_move_the_member_list() {
+        let mut translator = registered("me");
+        in_channel(&mut translator, "#rust", &["@alice"]);
+
+        let joined = translator.translate(Event::Joined {
+            channel: b"#rust".to_vec(),
+            who: sender("bob"),
+            is_self: false,
+        });
+        assert_eq!(
+            roster_after(&joined, "#rust"),
+            Some(vec!["@alice".to_owned(), "bob".to_owned()])
+        );
+
+        let parted = translator.translate(Event::Parted {
+            channel: b"#rust".to_vec(),
+            who: sender("bob"),
+            reason: None,
+            is_self: false,
+        });
+        assert_eq!(
+            roster_after(&parted, "#rust"),
+            Some(vec!["@alice".to_owned()])
+        );
+    }
+
+    #[test]
+    fn quitting_leaves_every_channel_shared() {
+        let mut translator = registered("me");
+        in_channel(&mut translator, "#one", &["bob"]);
+        in_channel(&mut translator, "#two", &["bob"]);
+
+        let events = translator.translate(Event::Quit {
+            who: sender("bob"),
+            reason: None,
+            channels: vec![b"#one".to_vec(), b"#two".to_vec()],
+        });
+
+        assert_eq!(roster_after(&events, "#one"), Some(Vec::new()));
+        assert_eq!(roster_after(&events, "#two"), Some(Vec::new()));
+    }
+
+    #[test]
+    fn a_numeric_does_not_show_its_trailing_text_twice() {
+        let mut translator = registered("me");
+        // 251 is "<count> :<text>": the text is also the last parameter, so a
+        // client showing both prints it twice.
+        let (_, line) = only_line(translator.translate(Event::Numeric {
+            code: 251,
+            params: vec![b"0".to_vec(), b"unknown connection(s)".to_vec()],
+            text: Some(b"unknown connection(s)".to_vec()),
+        }));
+
+        assert_eq!(line.text, "0 unknown connection(s)");
+    }
+
+    #[test]
+    fn a_numeric_without_trailing_text_keeps_all_its_parameters() {
+        let mut translator = registered("me");
+        let (_, line) = only_line(translator.translate(Event::Numeric {
+            code: 4,
+            params: vec![
+                b"irc.example".to_vec(),
+                b"kestreld".to_vec(),
+                b"io".to_vec(),
+            ],
+            text: None,
+        }));
+
+        assert_eq!(line.text, "irc.example kestreld io");
     }
 
     #[test]

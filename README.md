@@ -49,7 +49,8 @@ something you would daily-drive.
 - [x] `kestrel-net` — the client transport, plaintext and TLS
 - [x] `kestrel-cli` — a terminal client. **Works today**
 - [~] `kestrel-ui` — the GTK client. **Connects, joins and chats**, with a
-      buffer list, member list and topic; calls are not wired into it yet
+      menu bar, buffer list, member list and topic. The Call menu is
+      present but its entries are disabled: calls are not wired in yet
 - [x] `kestrel-call` — the call state machine: consent, key exchange, mesh
 - [x] `kestrel-crypto` — identity, sealed payloads, short authentication strings
 - [x] `kestrel-rtc-proto` — compact session descriptions and signalling frames
@@ -76,9 +77,16 @@ the equivalent packages are listed in `.github/workflows/ci.yml`.
 ## Trying it
 
 ```powershell
+. .\scripts\dev-env.ps1     # required to RUN the interface, not just to build it
 cargo run -p kestreld -- kestreld.toml
 cargo run -p kestrel-ui -- 127.0.0.1:6667 --nick you -j '#test'
 ```
+
+GTK's DLLs live in the GStreamer prefix, which nothing puts on `PATH`. Without
+that first line the interface dies at startup with `STATUS_DLL_NOT_FOUND`
+(`0xc0000135`) before any of its own code runs, so it cannot explain itself.
+Packaging will ship the libraries beside the executable; until then, the shell
+has to be set up.
 
 For a call, run the terminal client twice and use `/call <nick>`, then
 `/answer`. Both ends print a four-word phrase; say it aloud to check nobody
