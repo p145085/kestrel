@@ -170,6 +170,16 @@ pub enum AppEvent {
         /// A call is in progress.
         active: bool,
     },
+    /// A peer's video needs somewhere to be drawn.
+    ///
+    /// The interface answers with [`UiCommand::VideoSink`]. It is asked rather
+    /// than told because the sink has to be built by whoever owns the display:
+    /// a paintable cannot leave the thread that made it, while the element
+    /// wrapped around it can.
+    VideoWanted {
+        /// Whose video.
+        peer: String,
+    },
     /// The connection ended.
     Disconnected {
         /// Why.
@@ -207,6 +217,15 @@ pub enum UiCommand {
     },
     /// Do something with a call.
     Call(CallAction),
+    /// Draw this peer's video into this sink.
+    ///
+    /// The element crosses threads; the widget it draws into does not.
+    VideoSink {
+        /// Whose video.
+        peer: String,
+        /// Where to draw it.
+        sink: kestrel_media::gstreamer::Element,
+    },
     /// Leave, and close the connection.
     Quit {
         /// The parting message.

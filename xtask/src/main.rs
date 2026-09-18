@@ -20,7 +20,7 @@ const BINARIES: [&str; 3] = ["kestrel-ui", "kestrel", "kestreld"];
 /// tables leads to them and they have to be listed. The set is small on
 /// purpose: the full plugin directory is the better part of a gigabyte, and a
 /// chat client that also makes calls needs a few dozen megabytes of it.
-const PLUGINS: [&str; 18] = [
+const PLUGINS: [&str; 19] = [
     "gstapp",
     "gstaudioconvert",
     "gstaudioresample",
@@ -28,6 +28,8 @@ const PLUGINS: [&str; 18] = [
     "gstautodetect",
     "gstcoreelements",
     "gstdtls",
+    // What the window draws a call into.
+    "gstgtk4",
     "gstnice",
     "gstopus",
     "gstplayback",

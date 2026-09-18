@@ -191,6 +191,46 @@ pub enum PeerEvent {
 /// handler that arrives after the close does nothing at all.
 type Gate = Arc<Mutex<bool>>;
 
+/// Where an incoming video stream is drawn.
+///
+/// The interface owns the sink, because a `gdk::Paintable` cannot leave the
+/// thread that made it while a `gst::Element` can. So the element arrives here
+/// from elsewhere, and may arrive before the stream does or after -- the first
+/// is the ordinary case, the second happens when a call connects faster than
+/// somebody can be asked where to put it.
+#[derive(Clone, Default)]
+struct VideoSlot(Arc<Mutex<Slot>>);
+
+#[derive(Default)]
+struct Slot {
+    /// Handed over before there was anything to draw.
+    waiting: Option<gst::Element>,
+    /// The chain that is running, so a later sink can replace its end.
+    live: Option<Live>,
+}
+
+/// A running video chain, cut at the point where the sink attaches.
+struct Live {
+    /// The converter feeding the sink. Its source pad is where we re-plug.
+    convert: gst::Element,
+    /// What is drawing at the moment.
+    sink: gst::Element,
+}
+
+impl VideoSlot {
+    /// Take whatever sink is waiting, if any.
+    fn take_waiting(&self) -> Option<gst::Element> {
+        self.0.lock().ok()?.waiting.take()
+    }
+
+    /// Remember the chain, so a sink offered later has somewhere to go.
+    fn now_live(&self, convert: gst::Element, sink: gst::Element) {
+        if let Ok(mut slot) = self.0.lock() {
+            slot.live = Some(Live { convert, sink });
+        }
+    }
+}
+
 /// One connection to one peer.
 pub struct PeerConnection {
     pipeline: gst::Pipeline,
@@ -198,6 +238,8 @@ pub struct PeerConnection {
     /// Kept so that promise callbacks can report what they produced.
     events: mpsc::UnboundedSender<PeerEvent>,
     gate: Gate,
+    /// Where incoming video is drawn.
+    video: VideoSlot,
     /// When the pipeline started playing.
     opened: std::time::Instant,
 }
@@ -246,7 +288,8 @@ impl PeerConnection {
 
         let (events, receiver) = mpsc::unbounded_channel();
         let gate: Gate = Arc::new(Mutex::new(true));
-        connect_signals(&webrtc, &events, &gate);
+        let video = VideoSlot::default();
+        connect_signals(&webrtc, &events, &gate, &video);
         watch_bus(&pipeline, &events);
 
         pipeline
@@ -259,10 +302,59 @@ impl PeerConnection {
                 webrtc,
                 events,
                 gate,
+                video,
                 opened: std::time::Instant::now(),
             },
             receiver,
         ))
+    }
+
+    /// Draw this peer's video into the given sink.
+    ///
+    /// The sink is built by whoever owns the display and handed over as a
+    /// plain element, which is the only part of a video widget that may cross
+    /// a thread boundary. Safe to call at any point: before the stream exists
+    /// it is held, and afterwards it replaces whatever is drawing.
+    pub fn set_video_sink(&self, sink: gst::Element) -> Result<(), MediaError> {
+        let Ok(mut slot) = self.video.0.lock() else {
+            return Err(MediaError::Pipeline("the video slot is poisoned".into()));
+        };
+
+        let Some(live) = slot.live.as_mut() else {
+            // Nothing is decoding yet, so there is nothing to re-plug. The
+            // stream will pick this up when it arrives.
+            slot.waiting = Some(sink);
+            return Ok(());
+        };
+
+        let Some(source) = live.convert.static_pad("src") else {
+            return Err(MediaError::Pipeline(
+                "the converter has no source pad".into(),
+            ));
+        };
+
+        // Re-plugged from an idle probe rather than directly: the pad is
+        // carrying frames on a streaming thread, and unlinking it from under
+        // that thread is how a running pipeline turns into a flow error.
+        let pipeline = self.pipeline.clone();
+        let old = live.sink.clone();
+        let new = sink.clone();
+        let gate = Arc::clone(&self.gate);
+        source.add_probe(gst::PadProbeType::IDLE, move |pad, _| {
+            let Ok(open) = gate.lock() else {
+                return gst::PadProbeReturn::Remove;
+            };
+            if !*open {
+                return gst::PadProbeReturn::Remove;
+            }
+            if let Err(error) = replace_sink(&pipeline, pad, &old, &new) {
+                warn!("could not attach the video sink: {error}");
+            }
+            gst::PadProbeReturn::Remove
+        });
+
+        live.sink = sink;
+        Ok(())
     }
 
     /// Ask for an offer. The result arrives as [`PeerEvent::LocalDescription`].
@@ -428,7 +520,12 @@ impl Drop for PeerConnection {
 }
 
 /// Wire the signals that fire on GStreamer's streaming threads.
-fn connect_signals(webrtc: &gst::Element, events: &mpsc::UnboundedSender<PeerEvent>, gate: &Gate) {
+fn connect_signals(
+    webrtc: &gst::Element,
+    events: &mpsc::UnboundedSender<PeerEvent>,
+    gate: &Gate,
+    video: &VideoSlot,
+) {
     let tx = events.clone();
     webrtc.connect("on-negotiation-needed", false, move |_| {
         let _ = tx.send(PeerEvent::NegotiationNeeded);
@@ -465,6 +562,7 @@ fn connect_signals(webrtc: &gst::Element, events: &mpsc::UnboundedSender<PeerEve
     // work happens on GStreamer's threads, not this one.
     let tx = events.clone();
     let gate = Arc::clone(gate);
+    let video = video.clone();
     webrtc.connect_pad_added(move |element, pad| {
         if pad.direction() != gst::PadDirection::Src {
             return;
@@ -481,7 +579,7 @@ fn connect_signals(webrtc: &gst::Element, events: &mpsc::UnboundedSender<PeerEve
         else {
             return;
         };
-        if let Err(error) = attach_receiver(&pipeline, pad, &tx, &gate) {
+        if let Err(error) = attach_receiver(&pipeline, pad, &tx, &gate, &video) {
             let _ = tx.send(PeerEvent::Error(error.to_string()));
         }
     });
@@ -497,6 +595,7 @@ fn attach_receiver(
     pad: &gst::Pad,
     events: &mpsc::UnboundedSender<PeerEvent>,
     gate: &Gate,
+    video: &VideoSlot,
 ) -> Result<(), MediaError> {
     // Plain `decodebin`, deliberately. The pad carries `application/x-rtp`,
     // and `decodebin3` does not autoplug RTP depayloaders: it accepts the
@@ -512,6 +611,7 @@ fn attach_receiver(
     // Cloned rather than borrowed: this fires later, on another thread, and
     // possibly after the owner has closed the connection.
     let gate = Arc::clone(gate);
+    let video = video.clone();
     decode.connect_pad_added(move |_, pad| {
         let Ok(open) = gate.lock() else {
             return;
@@ -525,9 +625,15 @@ fn attach_receiver(
             .unwrap_or_default();
         let is_video = caps.starts_with("video");
 
-        match build_discard_sink(&pipeline_ref, is_video) {
-            Ok(sink) => {
-                let linked = sink
+        // Video goes wherever the interface asked, if it has asked yet.
+        let wanted = if is_video { video.take_waiting() } else { None };
+        match build_receive_chain(&pipeline_ref, is_video, wanted) {
+            Ok(chain) => {
+                if is_video {
+                    video.now_live(chain.convert, chain.sink);
+                }
+                let linked = chain
+                    .head
                     .static_pad("sink")
                     .is_some_and(|target| pad.link(&target).is_ok());
                 if linked {
@@ -565,11 +671,27 @@ fn attach_receiver(
     Ok(())
 }
 
-fn build_discard_sink(
+/// The parts of a receive chain worth keeping hold of.
+struct Chain {
+    /// Where the decoded stream is linked in.
+    head: gst::Element,
+    /// The converter feeding the sink.
+    convert: gst::Element,
+    /// Where it ends up.
+    sink: gst::Element,
+}
+
+/// Build the chain that consumes one decoded stream.
+///
+/// Without a sink of its own it ends in `fakesink`: a stream still has to be
+/// consumed or the pipeline stalls, and rendering is the interface's business
+/// rather than this crate's.
+fn build_receive_chain(
     pipeline: &gst::Pipeline,
     is_video: bool,
-) -> Result<gst::Element, MediaError> {
-    let convert = if is_video {
+    wanted: Option<gst::Element>,
+) -> Result<Chain, MediaError> {
+    let converter = if is_video {
         "videoconvert"
     } else {
         "audioconvert"
@@ -577,13 +699,16 @@ fn build_discard_sink(
     let queue = gst::ElementFactory::make("queue")
         .build()
         .map_err(|_| MediaError::MissingElement("queue"))?;
-    let convert = gst::ElementFactory::make(convert)
+    let convert = gst::ElementFactory::make(converter)
         .build()
         .map_err(|_| MediaError::MissingElement("converter"))?;
-    let sink = gst::ElementFactory::make("fakesink")
-        .property("sync", false)
-        .build()
-        .map_err(|_| MediaError::MissingElement("fakesink"))?;
+    let sink = match wanted {
+        Some(sink) => sink,
+        None => gst::ElementFactory::make("fakesink")
+            .property("sync", false)
+            .build()
+            .map_err(|_| MediaError::MissingElement("fakesink"))?,
+    };
 
     let elements = [&queue, &convert, &sink];
     pipeline
@@ -596,7 +721,45 @@ fn build_discard_sink(
             .sync_state_with_parent()
             .map_err(|_| MediaError::Pipeline("receive chain would not start".into()))?;
     }
-    Ok(queue)
+
+    Ok(Chain {
+        head: queue,
+        convert,
+        sink,
+    })
+}
+
+/// Put a different sink on the end of a running chain.
+///
+/// Called from an idle probe, so the pad is known not to be carrying anything
+/// at this moment and the swap cannot tear a buffer in half.
+fn replace_sink(
+    pipeline: &gst::Pipeline,
+    source: &gst::Pad,
+    old: &gst::Element,
+    new: &gst::Element,
+) -> Result<(), MediaError> {
+    if let Some(target) = old.static_pad("sink") {
+        let _ = source.unlink(&target);
+    }
+    // Stopped before it leaves the pipeline: removing a playing element
+    // leaves it running with nowhere to send what it produces.
+    let _ = old.set_state(gst::State::Null);
+    let _ = pipeline.remove(old);
+
+    pipeline
+        .add(new)
+        .map_err(|_| MediaError::Pipeline("could not add the video sink".into()))?;
+    new.sync_state_with_parent()
+        .map_err(|_| MediaError::Pipeline("the video sink would not start".into()))?;
+
+    let target = new.static_pad("sink").ok_or(MediaError::Pipeline(
+        "the video sink has no sink pad".into(),
+    ))?;
+    source
+        .link(&target)
+        .map_err(|_| MediaError::Pipeline("could not link the video sink".into()))?;
+    Ok(())
 }
 
 /// Forward pipeline errors and warnings.

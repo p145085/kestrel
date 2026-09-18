@@ -65,6 +65,8 @@ pub struct Calls {
     media_tx: mpsc::UnboundedSender<TaggedMediaEvent>,
     /// What the client should show, waiting to be collected.
     notices: Vec<Notice>,
+    /// Peers whose video has nowhere to go yet.
+    video_wanted: Vec<String>,
 }
 
 struct ActiveCall {
@@ -124,7 +126,37 @@ impl Calls {
             negotiation_ready: HashSet::new(),
             media_tx,
             notices: Vec::new(),
+            video_wanted: Vec::new(),
         }
+    }
+
+    /// Take the peers still waiting for somewhere to draw their video.
+    ///
+    /// The engine cannot build the sink itself: what draws a video frame
+    /// belongs to whatever owns the display, and on most toolkits it
+    /// cannot leave the thread that made it. So the peer is named here
+    /// and the element comes back.
+    pub fn take_video_wanted(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.video_wanted)
+    }
+
+    /// Draw a peer's video into this sink.
+    ///
+    /// Accepted whether or not the peer is sending anything yet: the
+    /// engine holds it until there is something to draw.
+    pub fn attach_video_sink(
+        &mut self,
+        peer: &str,
+        sink: kestrel_media::gstreamer::Element,
+    ) -> Result<()> {
+        let Some(call_id) = self.call_of(peer) else {
+            bail!("there is no call with {peer}");
+        };
+        let Some(connection) = self.connections.get(&(call_id, peer.to_owned())) else {
+            bail!("there is no connection to {peer}");
+        };
+        connection.set_video_sink(sink)?;
+        Ok(())
     }
 
     /// Take everything waiting to be shown.
@@ -728,6 +760,12 @@ impl Calls {
                     }
                 });
                 self.connections.insert(key, connection);
+                if sending.video {
+                    // Asked for now rather than when the first frame arrives:
+                    // a sink handed over early is simply held, and one handed
+                    // over late means frames with nowhere to go in between.
+                    self.video_wanted.push(peer.to_owned());
+                }
             }
             Err(error) => self.warn(format!("could not open the microphone or camera: {error}")),
         }

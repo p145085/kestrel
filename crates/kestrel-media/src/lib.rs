@@ -8,6 +8,13 @@ pub mod peer;
 
 use std::sync::Once;
 
+/// The GStreamer this crate was built against.
+///
+/// Re-exported so that a caller building a sink for us cannot end up
+/// using a different version of the bindings, which would be a type
+/// mismatch at best and two incompatible registries at worst.
+pub use gstreamer;
+
 use gstreamer as gst;
 use tracing::debug;
 

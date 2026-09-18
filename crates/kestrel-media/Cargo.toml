@@ -9,9 +9,9 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-gstreamer = "0.24"
-gstreamer-webrtc = "0.24"
-gstreamer-sdp = "0.24"
+gstreamer = "0.25"
+gstreamer-webrtc = "0.25"
+gstreamer-sdp = "0.25"
 tokio = { workspace = true, features = ["sync"] }
 thiserror.workspace = true
 tracing.workspace = true

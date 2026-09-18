@@ -158,6 +158,10 @@ impl State {
                 .await;
         }
 
+        for peer in self.calls.take_video_wanted() {
+            let _ = events.send(AppEvent::VideoWanted { peer }).await;
+        }
+
         let now = (self.calls.is_ringing(), self.calls.in_call());
         if now != self.reported {
             self.reported = now;
@@ -257,6 +261,12 @@ impl State {
                     show(events, Line::error(error.to_string())).await;
                 }
                 self.flush(events).await;
+                None
+            }
+            UiCommand::VideoSink { peer, sink } => {
+                if let Err(error) = self.calls.attach_video_sink(&peer, sink) {
+                    show(events, Line::error(error.to_string())).await;
+                }
                 None
             }
             UiCommand::Quit { reason } => {

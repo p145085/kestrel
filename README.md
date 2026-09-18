@@ -49,7 +49,7 @@ something you would daily-drive.
 - [x] `kestrel-net` — the client transport, plaintext and TLS
 - [x] `kestrel-cli` — a terminal client. **Works today**
 - [x] `kestrel-ui` — the GTK client: a connection dialog, menu bar, buffer
-      list, member list, topic, **and calls**
+      list, member list, topic, **and calls with video on screen**
 - [x] `xtask bundle` — a folder that runs without GStreamer or GTK installed
 - [x] `kestrel-call` — the call state machine: consent, key exchange, mesh
 - [x] `kestrel-client` — the layer both clients share, so that a call
@@ -127,6 +127,10 @@ aloud to check nobody is in the middle, and confirm it once it matches.
 `--list-cameras` (terminal client) shows what is available -- worth
 checking, since Windows may rank a paired phone ahead of anything plugged
 in.
+
+Video is drawn by a sink the window builds and hands to the media engine:
+a `gdk::Paintable` cannot leave the thread that made it, but the element
+wrapped around it can, so the element crosses and the widget never does.
 
 To watch what the window is doing without opening one:
 

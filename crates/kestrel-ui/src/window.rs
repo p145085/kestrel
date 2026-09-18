@@ -56,6 +56,8 @@ pub struct Window {
     view: gtk::TextView,
     entry: gtk::Entry,
     topic: gtk::Label,
+    /// Where a call's video is drawn.
+    videos: gtk::Box,
     sidebar: gtk::ListBox,
     members: gtk::ListBox,
     members_pane: gtk::Widget,
@@ -71,6 +73,9 @@ pub struct Window {
 
 impl Window {
     /// Build the window and show it.
+    // Laying out a window is a long straight line of widgets; splitting it
+    // would scatter the layout rather than clarify it.
+    #[allow(clippy::too_many_lines)]
     pub fn build(
         app: &gtk::Application,
         commands: mpsc::UnboundedSender<UiCommand>,
@@ -131,8 +136,19 @@ impl Window {
             .child(&members)
             .build();
 
+        // Where a call's video goes. Hidden until there is any, so a text
+        // client does not permanently reserve a third of its own window.
+        let videos = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        videos.set_homogeneous(true);
+        videos.set_margin_start(6);
+        videos.set_margin_end(6);
+        videos.set_margin_top(6);
+        videos.set_height_request(240);
+        videos.set_visible(false);
+
         let centre = gtk::Box::new(gtk::Orientation::Vertical, 0);
         centre.append(&topic);
+        centre.append(&videos);
         centre.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         centre.append(&scroller);
         centre.append(&entry);
@@ -161,6 +177,7 @@ impl Window {
             view,
             entry,
             topic,
+            videos,
             sidebar,
             members,
             members_pane: members_pane.upcast(),
@@ -275,8 +292,12 @@ impl Window {
                     state.ringing = ringing;
                     state.in_call = active;
                 }
+                if !active {
+                    self.clear_video();
+                }
                 self.update_actions();
             }
+            AppEvent::VideoWanted { peer } => self.show_video(&peer),
             AppEvent::Disconnected { reason } => {
                 self.state.borrow_mut().connected = false;
                 self.append(
@@ -799,6 +820,60 @@ impl Window {
             .detail(detail)
             .build();
         dialog.show(self.window().as_ref());
+    }
+
+    /// Make somewhere for a peer's video and hand the engine the far end.
+    ///
+    /// This is the one place the two runtimes meet. The sink is created on
+    /// this thread because the paintable it produces belongs to GTK and cannot
+    /// leave; the sink element itself is ordinary and crosses to the media
+    /// thread, where it is plugged into the pipeline. Nothing GTK owns ever
+    /// goes the other way.
+    fn show_video(&self, peer: &str) {
+        let Ok(sink) = kestrel_media::gstreamer::ElementFactory::make("gtk4paintablesink").build()
+        else {
+            self.append(
+                SERVER_BUFFER,
+                &Line::error(
+                    "no gtk4paintablesink, so there is nowhere to draw video; \
+                     the call will carry audio only",
+                ),
+            );
+            return;
+        };
+
+        let paintable: gdk::Paintable = sink.property("paintable");
+        let picture = gtk::Picture::builder()
+            .paintable(&paintable)
+            .content_fit(gtk::ContentFit::Contain)
+            .hexpand(true)
+            .vexpand(true)
+            .build();
+
+        let labelled = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        labelled.append(&picture);
+        labelled.append(
+            &gtk::Label::builder()
+                .label(peer)
+                .css_classes(["dim-label"])
+                .build(),
+        );
+
+        self.videos.append(&labelled);
+        self.videos.set_visible(true);
+
+        let _ = self.commands.borrow().send(UiCommand::VideoSink {
+            peer: peer.to_owned(),
+            sink,
+        });
+    }
+
+    /// Take the video away when there is no longer a call.
+    fn clear_video(&self) {
+        while let Some(child) = self.videos.first_child() {
+            self.videos.remove(&child);
+        }
+        self.videos.set_visible(false);
     }
 
     /// Ask the connection to do something with a call.
