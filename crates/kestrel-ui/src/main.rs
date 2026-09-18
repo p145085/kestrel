@@ -52,6 +52,11 @@ struct Options {
 }
 
 fn main() -> Result<()> {
+    // Before anything else. A graphical build has no console, so without this
+    // a panic prints to nowhere and the window simply vanishes -- which is
+    // indistinguishable from somebody closing it.
+    kestrel_client::crash::write_panics_to_a_file();
+
     // Warnings and worse only: this is a chat window, and its console is for
     // things that went wrong rather than a running commentary.
     tracing_subscriber::fmt()
@@ -61,6 +66,14 @@ fn main() -> Result<()> {
     let Some(options) = parse_args()? else {
         return Ok(());
     };
+
+    if let Some(log) = kestrel_client::crash::crash_log()
+        && log.exists()
+    {
+        // Said once at startup rather than never: a crash report nobody knows
+        // about is the same as no crash report.
+        eprintln!("a previous run left a crash report at {}", log.display());
+    }
 
     let app = gtk::Application::builder()
         .application_id("chat.kestrel.Client")

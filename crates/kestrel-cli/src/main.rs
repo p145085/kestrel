@@ -198,6 +198,8 @@ fn parse_args() -> Result<Option<Options>> {
 // Splitting it would scatter the order things must happen in.
 #[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
+    kestrel_client::crash::write_panics_to_a_file();
+
     let Some(options) = parse_args()? else {
         return Ok(());
     };

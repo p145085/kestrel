@@ -6,6 +6,7 @@
 //! from behaving differently depending on which one you are looking at.
 
 pub mod calls;
+pub mod crash;
 pub mod notice;
 pub mod store;
 

@@ -142,7 +142,8 @@ kestrel 127.0.0.1:6667 --sasl myname --sasl-pass mypassword
 The window has Account and Password fields in its connection dialog.
 
 Your identity and the keys you have pinned are kept in
-`%APPDATA%\kestrel\identity.json` (or `~/.config/kestrel/identity.json`).
+`%APPDATA%\kestrel\identity.json` (or `~/.config/kestrel/identity.json`),
+and a crash leaves a report beside it in `crash.log`.
 Set `KESTREL_IDENTITY` to use a different one, which is how two clients on
 one machine get separate identities.
 

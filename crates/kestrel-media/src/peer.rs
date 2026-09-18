@@ -13,7 +13,7 @@ use gstreamer_webrtc as gst_webrtc;
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 use crate::MediaError;
 
@@ -190,6 +190,22 @@ pub enum PeerEvent {
     },
     /// Something went wrong.
     Error(String),
+}
+
+/// Run a callback body without letting a panic escape into C.
+///
+/// Every handler here is called by GStreamer, from C, on one of its own
+/// threads. A panic unwinding through a C frame is undefined behaviour, and
+/// what it does in practice is end the process without a word -- which is the
+/// worst way to find out about a bug, because there is nothing left to read.
+/// Returning a fallback instead keeps the pipeline running and leaves a line
+/// in the log saying where to look.
+fn guarded<T>(what: &str, fallback: T, body: impl FnOnce() -> T) -> T {
+    let Ok(value) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) else {
+        error!("panicked inside {what}; the pipeline carries on without it");
+        return fallback;
+    };
+    value
 }
 
 /// What the capture elements are called, so a failure can be attributed.
@@ -369,16 +385,18 @@ impl PeerConnection {
         let new = sink.clone();
         let gate = Arc::clone(&self.gate);
         source.add_probe(gst::PadProbeType::IDLE, move |pad, _| {
-            let Ok(open) = gate.lock() else {
-                return gst::PadProbeReturn::Remove;
-            };
-            if !*open {
-                return gst::PadProbeReturn::Remove;
-            }
-            if let Err(error) = replace_sink(&pipeline, pad, &old, &new) {
-                warn!("could not attach the video sink: {error}");
-            }
-            gst::PadProbeReturn::Remove
+            guarded("a video sink swap", gst::PadProbeReturn::Remove, || {
+                let Ok(open) = gate.lock() else {
+                    return gst::PadProbeReturn::Remove;
+                };
+                if !*open {
+                    return gst::PadProbeReturn::Remove;
+                }
+                if let Err(error) = replace_sink(&pipeline, pad, &old, &new) {
+                    warn!("could not attach the video sink: {error}");
+                }
+                gst::PadProbeReturn::Remove
+            })
         });
 
         live.sink = sink;
@@ -409,30 +427,33 @@ impl PeerConnection {
         let webrtc = self.webrtc.clone();
         let events = self.events.clone();
         let promise = gst::Promise::with_change_func(move |reply| {
-            let Ok(Some(reply)) = reply else {
-                let _ = events.send(PeerEvent::Error(format!("{kind} was not produced")));
-                return;
-            };
-            let Ok(description) = reply.get::<gst_webrtc::WebRTCSessionDescription>(kind) else {
-                let _ = events.send(PeerEvent::Error(format!(
-                    "{kind} reply carried no session description"
-                )));
-                return;
-            };
+            guarded("a description callback", (), || {
+                let Ok(Some(reply)) = reply else {
+                    let _ = events.send(PeerEvent::Error(format!("{kind} was not produced")));
+                    return;
+                };
+                let Ok(description) = reply.get::<gst_webrtc::WebRTCSessionDescription>(kind)
+                else {
+                    let _ = events.send(PeerEvent::Error(format!(
+                        "{kind} reply carried no session description"
+                    )));
+                    return;
+                };
 
-            // Setting our own description is what starts ICE gathering, which
-            // is why it happens here rather than being left to the caller.
-            webrtc.emit_by_name::<()>(
-                "set-local-description",
-                &[&description, &None::<gst::Promise>],
-            );
+                // Setting our own description is what starts ICE gathering, which
+                // is why it happens here rather than being left to the caller.
+                webrtc.emit_by_name::<()>(
+                    "set-local-description",
+                    &[&description, &None::<gst::Promise>],
+                );
 
-            // And the caller has to be told, or the description never reaches
-            // the peer and the call silently never connects.
-            let sdp = description.sdp().as_text().unwrap_or_default();
-            let _ = events.send(PeerEvent::LocalDescription {
-                kind: kind.to_owned(),
-                sdp,
+                // And the caller has to be told, or the description never reaches
+                // the peer and the call silently never connects.
+                let sdp = description.sdp().as_text().unwrap_or_default();
+                let _ = events.send(PeerEvent::LocalDescription {
+                    kind: kind.to_owned(),
+                    sdp,
+                });
             });
         });
         self.webrtc
@@ -602,24 +623,26 @@ fn connect_signals(
     let gate = Arc::clone(gate);
     let video = video.clone();
     webrtc.connect_pad_added(move |element, pad| {
-        if pad.direction() != gst::PadDirection::Src {
-            return;
-        }
-        let Ok(open) = gate.lock() else {
-            return;
-        };
-        if !*open {
-            return;
-        }
-        let Some(pipeline) = element
-            .parent()
-            .and_then(|p| p.downcast::<gst::Pipeline>().ok())
-        else {
-            return;
-        };
-        if let Err(error) = attach_receiver(&pipeline, pad, &tx, &gate, &video) {
-            let _ = tx.send(PeerEvent::Error(error.to_string()));
-        }
+        guarded("an incoming stream", (), || {
+            if pad.direction() != gst::PadDirection::Src {
+                return;
+            }
+            let Ok(open) = gate.lock() else {
+                return;
+            };
+            if !*open {
+                return;
+            }
+            let Some(pipeline) = element
+                .parent()
+                .and_then(|p| p.downcast::<gst::Pipeline>().ok())
+            else {
+                return;
+            };
+            if let Err(error) = attach_receiver(&pipeline, pad, &tx, &gate, &video) {
+                let _ = tx.send(PeerEvent::Error(error.to_string()));
+            }
+        });
     });
 }
 
@@ -651,45 +674,47 @@ fn attach_receiver(
     let gate = Arc::clone(gate);
     let video = video.clone();
     decode.connect_pad_added(move |_, pad| {
-        let Ok(open) = gate.lock() else {
-            return;
-        };
-        if !*open {
-            return;
-        }
-        let caps = pad
-            .current_caps()
-            .and_then(|caps| caps.structure(0).map(|s| s.name().to_string()))
-            .unwrap_or_default();
-        let is_video = caps.starts_with("video");
+        guarded("a decoded stream", (), || {
+            let Ok(open) = gate.lock() else {
+                return;
+            };
+            if !*open {
+                return;
+            }
+            let caps = pad
+                .current_caps()
+                .and_then(|caps| caps.structure(0).map(|s| s.name().to_string()))
+                .unwrap_or_default();
+            let is_video = caps.starts_with("video");
 
-        // Video goes wherever the interface asked, if it has asked yet.
-        let wanted = if is_video { video.take_waiting() } else { None };
-        match build_receive_chain(&pipeline_ref, is_video, wanted) {
-            Ok(chain) => {
-                if is_video {
-                    video.now_live(chain.convert, chain.sink);
+            // Video goes wherever the interface asked, if it has asked yet.
+            let wanted = if is_video { video.take_waiting() } else { None };
+            match build_receive_chain(&pipeline_ref, is_video, wanted) {
+                Ok(chain) => {
+                    if is_video {
+                        video.now_live(chain.convert, chain.sink);
+                    }
+                    let linked = chain
+                        .head
+                        .static_pad("sink")
+                        .is_some_and(|target| pad.link(&target).is_ok());
+                    if linked {
+                        // Reported from here rather than when the stream was
+                        // linked, because until decoding starts there is nothing
+                        // to name: the kind is only known once caps are.
+                        let kind = if is_video { "video" } else { "audio" };
+                        let _ = tx.send(PeerEvent::RemoteTrack {
+                            kind: kind.to_owned(),
+                        });
+                    } else {
+                        warn!("could not link decoded {caps}");
+                    }
                 }
-                let linked = chain
-                    .head
-                    .static_pad("sink")
-                    .is_some_and(|target| pad.link(&target).is_ok());
-                if linked {
-                    // Reported from here rather than when the stream was
-                    // linked, because until decoding starts there is nothing
-                    // to name: the kind is only known once caps are.
-                    let kind = if is_video { "video" } else { "audio" };
-                    let _ = tx.send(PeerEvent::RemoteTrack {
-                        kind: kind.to_owned(),
-                    });
-                } else {
-                    warn!("could not link decoded {caps}");
+                Err(error) => {
+                    let _ = tx.send(PeerEvent::Error(error.to_string()));
                 }
             }
-            Err(error) => {
-                let _ = tx.send(PeerEvent::Error(error.to_string()));
-            }
-        }
+        });
     });
 
     pipeline
@@ -813,44 +838,46 @@ fn watch_bus(pipeline: &gst::Pipeline, events: &mpsc::UnboundedSender<PeerEvent>
     // hand the message on. A watch would need a running GLib main loop, which
     // there is not one of here.
     bus.set_sync_handler(move |_, message| {
-        match message.view() {
-            gst::MessageView::Error(error) if reported.swap(true, Ordering::Relaxed) => {
-                // GStreamer cascades: one element failing makes its neighbours
-                // fail too. The first is the one worth reporting; the rest are
-                // a description of the wreckage.
-                debug!("further pipeline error: {}", error.error());
-            }
-            gst::MessageView::Error(error) => {
-                // Name the element and keep the detail. "Internal data stream
-                // error" on its own says nothing about which part of a
-                // dozen-element pipeline gave up.
-                let source = message.src().map_or_else(
-                    || "pipeline".to_owned(),
-                    |src| src.path_string().to_string(),
-                );
-                let detail = error.debug().map(|d| format!(" ({d})")).unwrap_or_default();
-                let what = if source.contains(CAMERA) {
-                    Some("camera")
-                } else if source.contains(MICROPHONE) {
-                    Some("microphone")
-                } else {
-                    None
-                };
+        guarded("the pipeline bus", gst::BusSyncReply::Drop, || {
+            match message.view() {
+                gst::MessageView::Error(error) if reported.swap(true, Ordering::Relaxed) => {
+                    // GStreamer cascades: one element failing makes its neighbours
+                    // fail too. The first is the one worth reporting; the rest are
+                    // a description of the wreckage.
+                    debug!("further pipeline error: {}", error.error());
+                }
+                gst::MessageView::Error(error) => {
+                    // Name the element and keep the detail. "Internal data stream
+                    // error" on its own says nothing about which part of a
+                    // dozen-element pipeline gave up.
+                    let source = message.src().map_or_else(
+                        || "pipeline".to_owned(),
+                        |src| src.path_string().to_string(),
+                    );
+                    let detail = error.debug().map(|d| format!(" ({d})")).unwrap_or_default();
+                    let what = if source.contains(CAMERA) {
+                        Some("camera")
+                    } else if source.contains(MICROPHONE) {
+                        Some("microphone")
+                    } else {
+                        None
+                    };
 
-                let _ = tx.send(match what {
-                    Some(what) => PeerEvent::CaptureFailed {
-                        what,
-                        detail: error.error().to_string(),
-                    },
-                    None => PeerEvent::Error(format!("{source}: {}{detail}", error.error())),
-                });
+                    let _ = tx.send(match what {
+                        Some(what) => PeerEvent::CaptureFailed {
+                            what,
+                            detail: error.error().to_string(),
+                        },
+                        None => PeerEvent::Error(format!("{source}: {}{detail}", error.error())),
+                    });
+                }
+                gst::MessageView::Warning(warning) => {
+                    debug!("pipeline warning: {}", warning.error());
+                }
+                _ => {}
             }
-            gst::MessageView::Warning(warning) => {
-                debug!("pipeline warning: {}", warning.error());
-            }
-            _ => {}
-        }
-        gst::BusSyncReply::Drop
+            gst::BusSyncReply::Drop
+        })
     });
 }
 
