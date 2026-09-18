@@ -1,0 +1,20 @@
+[package]
+name = "kestrel-rtc-proto"
+description = "Compact session descriptions and sealed signalling frames for Kestrel calls."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+kestrel-crypto.workspace = true
+base64.workspace = true
+ciborium = "0.2"
+serde_bytes.workspace = true
+serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
+
+[lints]
+workspace = true

@@ -1,7 +1,9 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/kestrel-crypto",
     "crates/kestrel-proto",
+    "crates/kestrel-rtc-proto",
     "crates/kestrel-session",
     "crates/kestrel-net",
     "crates/kestrel-cli",
@@ -19,7 +21,9 @@ repository = "https://github.com/p145085/kestrel"
 authors = ["Kestrel contributors"]
 
 [workspace.dependencies]
+kestrel-crypto = { path = "crates/kestrel-crypto" }
 kestrel-proto = { path = "crates/kestrel-proto" }
+kestrel-rtc-proto = { path = "crates/kestrel-rtc-proto" }
 kestrel-session = { path = "crates/kestrel-session" }
 kestrel-net = { path = "crates/kestrel-net" }
 kestreld-core = { path = "crates/kestreld-core" }
@@ -45,6 +49,7 @@ sha2 = "0.10"
 webpki-roots = "1"
 rcgen = "0.13"
 serde_json = "1"
+serde_bytes = "0.11"
 tempfile = "3"
 memchr = "2.7"
 thiserror = "2"

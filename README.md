@@ -48,8 +48,11 @@ Early development. Nothing is usable yet.
 - [x] `kestrel-net` — the client transport, plaintext and TLS
 - [x] `kestrel-cli` — a terminal client. **Works today**
 - [ ] `kestrel-ui` — the GTK client
-- [~] Calls — the [specification](spec/rtc-over-irc.md) and the server's `CALL`
-      command family are done. Media, and therefore actual calls, are not
+- [x] `kestrel-crypto` — identity, sealed payloads, short authentication strings
+- [x] `kestrel-rtc-proto` — compact session descriptions and signalling frames
+- [~] Calls — the [specification](spec/rtc-over-irc.md), the server's `CALL`
+      command family, and the whole payload layer are done. **Media is not**:
+      nothing yet captures, encodes or plays audio or video
 
 **The server works.** You can point HexChat, WeeChat or irssi at it today and
 chat: register, join channels, set modes and topics, kick, ban, and authenticate

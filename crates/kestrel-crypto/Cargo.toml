@@ -1,0 +1,24 @@
+[package]
+name = "kestrel-crypto"
+description = "Identity, sealed signalling payloads, and short authentication strings for Kestrel calls."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2.workspace = true
+rand_core.workspace = true
+zeroize = "1"
+subtle.workspace = true
+thiserror.workspace = true
+serde = { workspace = true, features = ["derive"] }
+
+[lints]
+workspace = true
