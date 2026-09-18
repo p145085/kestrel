@@ -22,6 +22,57 @@ use tokio::sync::mpsc;
 use crate::notice::{Level, Notice};
 use crate::store::Store;
 
+/// What a decision about a person is filed under.
+///
+/// An account where there is one, because that is a person; a nickname
+/// otherwise, because that is all there is. The distinction matters: a
+/// nickname can be given up and taken by somebody else, so a permission
+/// attached to one is inherited by whoever holds it next. An account cannot be
+/// taken that way, and the key it pins is checked end to end.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PeerKey {
+    /// A services account, which is a person.
+    Account(String),
+    /// A nickname, which is only whoever holds it at the moment.
+    Nickname(String),
+}
+
+impl PeerKey {
+    /// Whether this names a person rather than a seat somebody is sitting in.
+    #[must_use]
+    pub fn is_account(&self) -> bool {
+        matches!(self, Self::Account(_))
+    }
+
+    /// A stable name for this key, safe to use where the character set is
+    /// narrow -- an interface action, say, where a nickname's punctuation is
+    /// not allowed.
+    #[must_use]
+    pub fn token(&self) -> String {
+        // FNV-1a, because all that is wanted is a short stable name and
+        // reaching for a hash crate to get one would be silly.
+        let (tag, name) = match self {
+            Self::Account(name) => ("a", name),
+            Self::Nickname(name) => ("n", name),
+        };
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in tag.bytes().chain(name.bytes()) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        format!("{hash:016x}")
+    }
+}
+
+impl std::fmt::Display for PeerKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Both read as a plain name: what differs is how much it is worth,
+        // which is `is_account`'s business rather than this one's.
+        let (Self::Account(name) | Self::Nickname(name)) = self;
+        write!(f, "{name}")
+    }
+}
+
 /// What one peer is allowed, and what we are willing to hear from them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Permissions {
@@ -44,8 +95,10 @@ impl Default for Permissions {
 /// One peer in a call, and what is currently allowed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerControl {
-    /// Their nickname.
+    /// Their nickname, which is what to call them on screen.
     pub peer: String,
+    /// What the decision is actually filed under.
+    pub key: PeerKey,
     /// The conversation the call is in.
     pub target: String,
     /// What is allowed.
@@ -112,12 +165,17 @@ pub struct Calls {
     self_view_wanted: Option<String>,
     /// Where our identity and pinned keys are kept, if anywhere.
     store: Option<Store>,
+    /// What account each peer is logged in as, as the server reports it.
+    ///
+    /// Learned from `account-tag` on their signalling. Kept because a
+    /// nickname is only who somebody is this second.
+    accounts: HashMap<String, String>,
     /// Who may see us, and who we are listening to.
     ///
     /// Kept per peer rather than per call, because a decision about a person
     /// is about that person: somebody muted in one conversation is not
     /// somebody you want to hear the moment they appear in another.
-    permissions: HashMap<String, Permissions>,
+    permissions: HashMap<PeerKey, Permissions>,
     /// Devices chosen for particular conversations.
     ///
     /// One camera for a friend and another for a channel is a reasonable
@@ -181,6 +239,7 @@ impl Calls {
             },
             per_target: HashMap::new(),
             permissions: HashMap::new(),
+            accounts: HashMap::new(),
             media: MediaWanted::audio_video(),
             active: HashMap::new(),
             connections: HashMap::new(),
@@ -351,6 +410,7 @@ impl Calls {
             .keys()
             .map(|(call_id, peer)| PeerControl {
                 peer: peer.clone(),
+                key: self.key_for(peer),
                 target: self
                     .active
                     .get(call_id)
@@ -365,11 +425,29 @@ impl Calls {
         controls
     }
 
+    /// Record what account a peer is logged in as.
+    ///
+    /// Learned from their signalling in practice; exposed so that the
+    /// behaviour which depends on it can be tested without a server.
+    pub fn learn_account(&mut self, peer: &str, account: &str) {
+        self.accounts
+            .insert(conversation_key(peer), account.to_owned());
+    }
+
+    /// What a decision about this peer is filed under.
+    #[must_use]
+    pub fn key_for(&self, peer: &str) -> PeerKey {
+        match self.accounts.get(&conversation_key(peer)) {
+            Some(account) => PeerKey::Account(conversation_key(account)),
+            None => PeerKey::Nickname(conversation_key(peer)),
+        }
+    }
+
     /// What a peer is currently allowed.
     #[must_use]
     pub fn permissions_for(&self, peer: &str) -> Permissions {
         self.permissions
-            .get(&conversation_key(peer))
+            .get(&self.key_for(peer))
             .copied()
             .unwrap_or_default()
     }
@@ -378,7 +456,7 @@ impl Calls {
     pub fn set_video_allowed(&mut self, peer: &str, allowed: bool) {
         let mut permissions = self.permissions_for(peer);
         permissions.may_see_video = allowed;
-        self.permissions.insert(conversation_key(peer), permissions);
+        self.permissions.insert(self.key_for(peer), permissions);
 
         for ((_, who), connection) in &self.connections {
             if conversation_key(who) == conversation_key(peer) {
@@ -399,7 +477,7 @@ impl Calls {
     pub fn set_deafened(&mut self, peer: &str, deafened: bool) {
         let mut permissions = self.permissions_for(peer);
         permissions.hearing_audio = !deafened;
-        self.permissions.insert(conversation_key(peer), permissions);
+        self.permissions.insert(self.key_for(peer), permissions);
 
         for ((_, who), connection) in &self.connections {
             if conversation_key(who) == conversation_key(peer) {
@@ -634,6 +712,10 @@ impl Calls {
         // Without it a key has nothing to be pinned against, so verification
         // holds only for the call it happened in.
         let account = account.map(|name| String::from_utf8_lossy(name).into_owned());
+        if let Some(account) = &account {
+            self.accounts
+                .insert(conversation_key(&peer), account.clone());
+        }
         let text = |index: usize| -> String {
             params
                 .get(index)
@@ -1112,6 +1194,51 @@ mod tests {
     fn calls() -> Calls {
         let (tx, _rx) = mpsc::unbounded_channel();
         Calls::new(tx)
+    }
+
+    #[test]
+    fn a_decision_about_an_account_follows_a_rename() {
+        // The whole point: a nickname is who somebody is this second, and a
+        // permission that only knew the nickname would be left behind.
+        let mut calls = calls();
+        calls.learn_account("alice", "alice_acct");
+        calls.set_deafened("alice", true);
+
+        calls.learn_account("robert", "alice_acct");
+        assert!(
+            !calls.permissions_for("robert").hearing_audio,
+            "renaming must not shed a decision made about the person"
+        );
+    }
+
+    #[test]
+    fn a_decision_about_a_nickname_is_not_inherited_by_an_account() {
+        let mut calls = calls();
+        calls.set_deafened("alice", true);
+        assert!(!calls.permissions_for("alice").hearing_audio);
+
+        // The same nickname, now held by somebody logged in: a different key,
+        // so the decision made about the bare nickname does not carry over.
+        calls.learn_account("alice", "someone_else");
+        assert!(
+            calls.permissions_for("alice").hearing_audio,
+            "a permission attached to a nickname must not follow it to a person"
+        );
+    }
+
+    #[test]
+    fn a_key_is_named_the_same_way_every_time() {
+        let account = PeerKey::Account("alice".to_owned());
+        assert_eq!(account.token(), account.token());
+        assert_ne!(
+            account.token(),
+            PeerKey::Nickname("alice".to_owned()).token(),
+            "an account and a nickname that read alike are still different keys"
+        );
+        assert!(
+            account.token().chars().all(|c| c.is_ascii_hexdigit()),
+            "an action name may only contain a narrow set of characters"
+        );
     }
 
     #[test]

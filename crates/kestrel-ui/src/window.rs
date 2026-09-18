@@ -1411,26 +1411,41 @@ impl Window {
 
     /// Offer a toggle per person in the call.
     ///
+    /// Named after what the decision is filed under rather than after a
+    /// position in the list. A position shifts the moment anybody joins or
+    /// leaves, which would silently move a toggle from one person to another
+    /// while its menu was open. The name is a hash of the key, because an
+    /// action name may only contain a narrow set of characters and neither a
+    /// nickname nor an account respects that.
+    ///
     /// Rebuilt from scratch each time, because the actions carry state and a
-    /// stale one would offer to deafen somebody who has already left. Named by
-    /// position rather than nickname: an action name may only contain a
-    /// narrow set of characters, and a nickname may contain many others.
+    /// stale one would offer to deafen somebody who has already left.
     fn rebuild_peer_menu(&self) {
         let Some(window) = self.window() else { return };
         let peers = self.state.borrow().peers.clone();
 
         let menu = gio::Menu::new();
-        for (index, control) in peers.iter().enumerate() {
+        for control in &peers {
+            let token = control.key.token();
             let person = gio::Menu::new();
-            person.append(Some("Hear them"), Some(&format!("win.hear-{index}")));
+            person.append(Some("Hear them"), Some(&format!("win.hear-{token}")));
             person.append(
                 Some("Let them see your video"),
-                Some(&format!("win.show-{index}")),
+                Some(&format!("win.show-{token}")),
             );
-            menu.append_submenu(Some(&control.peer), &person);
+
+            // Said on the label, because the two are not equally strong. A
+            // decision about an account follows the person; one about a
+            // nickname is inherited by whoever holds that nickname next.
+            let label = if control.key.is_account() {
+                control.peer.clone()
+            } else {
+                format!("{} (not logged in — applies to the nickname)", control.peer)
+            };
+            menu.append_submenu(Some(&label), &person);
 
             let hearing = gio::SimpleAction::new_stateful(
-                &format!("hear-{index}"),
+                &format!("hear-{token}"),
                 None,
                 &control.permissions.hearing_audio.to_variant(),
             );
@@ -1447,7 +1462,7 @@ impl Window {
             window.add_action(&hearing);
 
             let seeing = gio::SimpleAction::new_stateful(
-                &format!("show-{index}"),
+                &format!("show-{token}"),
                 None,
                 &control.permissions.may_see_video.to_variant(),
             );

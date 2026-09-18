@@ -10,6 +10,6 @@ pub mod crash;
 pub mod notice;
 pub mod store;
 
-pub use calls::{Calls, PeerControl, Permissions, TaggedMediaEvent};
+pub use calls::{Calls, PeerControl, PeerKey, Permissions, TaggedMediaEvent};
 pub use notice::{Level, Notice};
 pub use store::Store;
