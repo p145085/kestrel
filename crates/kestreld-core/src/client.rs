@@ -17,6 +17,16 @@ impl ClientId {
     pub fn get(self) -> u64 {
         self.0
     }
+
+    /// Build an identifier from a raw value.
+    ///
+    /// For code that drives a transport without a server behind it, which in
+    /// practice means tests. Forging one is harmless: an identifier is only a
+    /// lookup key, and one the server never issued finds nothing.
+    #[must_use]
+    pub const fn from_raw(value: u64) -> Self {
+        Self(value)
+    }
 }
 
 impl std::fmt::Display for ClientId {

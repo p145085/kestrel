@@ -148,6 +148,16 @@ pub enum AppEvent {
         /// The topic, or empty when there is none.
         topic: String,
     },
+    /// What the server calls itself, and what it runs.
+    ///
+    /// Worth showing: "server" names no server, and which of several windows
+    /// is which matters as soon as there is more than one.
+    ServerInfo {
+        /// The server's own name for itself.
+        name: String,
+        /// The software it runs.
+        version: String,
+    },
     /// The connection ended.
     Disconnected {
         /// Why.

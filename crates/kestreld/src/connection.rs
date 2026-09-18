@@ -48,6 +48,12 @@ pub enum Event {
     Disconnected(ClientId, String),
 }
 
+/// What a quiet client is asked.
+///
+/// The token is echoed back by anything that speaks the protocol, so what it
+/// says does not matter; that a reply arrives at all is the whole point.
+const PING: &[u8] = b"PING :keepalive\r\n";
+
 /// Serve one accepted connection until it ends.
 pub async fn serve<S>(
     stream: S,
@@ -59,6 +65,9 @@ pub async fn serve<S>(
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<Vec<u8>>(MAX_SEND_QUEUE);
+    // Kept back before the sender is handed to the core, so the read side can
+    // ask a quiet client whether it is still there.
+    let keepalive = outbound_tx.clone();
     let (id_tx, id_rx) = oneshot::channel();
 
     if events
@@ -91,7 +100,7 @@ pub async fn serve<S>(
         let _ = write_half.shutdown().await;
     });
 
-    let reason = read_loop(&mut reader, id, &events, idle_timeout).await;
+    let reason = read_loop(&mut reader, id, &events, &keepalive, idle_timeout).await;
 
     writer.abort();
     let _ = events.send(Event::Disconnected(id, reason)).await;
@@ -101,6 +110,7 @@ async fn read_loop<S>(
     reader: &mut BufReader<ReadHalf<S>>,
     id: ClientId,
     events: &mpsc::Sender<Event>,
+    keepalive: &mpsc::Sender<Vec<u8>>,
     idle_timeout: Duration,
 ) -> String
 where
@@ -108,14 +118,33 @@ where
 {
     let mut line = Vec::with_capacity(512);
 
-    loop {
-        line.clear();
-        let read = tokio::time::timeout(idle_timeout, reader.read_until(b'\n', &mut line)).await;
+    // Ask halfway through, and only give up if the question goes unanswered.
+    // Silence is not the same as absence: a client with nothing to say sits
+    // quiet indefinitely, and dropping it for that is a disconnection the user
+    // did nothing to deserve.
+    let ask_after = idle_timeout / 2;
+    let answer_within = idle_timeout.saturating_sub(ask_after);
+    let mut asked = false;
 
-        // The timeout elapsing means the client has said nothing at all.
+    loop {
+        let patience = if asked { answer_within } else { ask_after };
+        let read = tokio::time::timeout(patience, reader.read_until(b'\n', &mut line)).await;
+
         let Ok(read) = read else {
-            return "Ping timeout".to_owned();
+            if asked {
+                return "Ping timeout".to_owned();
+            }
+            if keepalive.send(PING.to_vec()).await.is_err() {
+                return "Connection closed".to_owned();
+            }
+            asked = true;
+            // `line` is deliberately not cleared: the timeout can land partway
+            // through a line, and those bytes are still the start of it.
+            continue;
         };
+
+        // Anything at all proves the client is there, PONG or not.
+        asked = false;
 
         match read {
             Ok(0) => return "Connection closed".to_owned(),
@@ -137,7 +166,9 @@ where
             continue; // Empty lines are legal and mean nothing.
         }
 
-        if events.send(Event::Line(id, line.clone())).await.is_err() {
+        let complete = std::mem::take(&mut line);
+        line = Vec::with_capacity(512);
+        if events.send(Event::Line(id, complete)).await.is_err() {
             return "Server shutting down".to_owned();
         }
     }

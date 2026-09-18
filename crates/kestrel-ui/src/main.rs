@@ -77,7 +77,7 @@ fn main() -> Result<()> {
             }
         }
         // Nothing on the command line, so ask.
-        Some(Options { connect: None, .. }) | None => connect::show(app),
+        Some(Options { connect: None, .. }) | None => connect::show(app, None),
     });
 
     // Emptied deliberately: GTK would otherwise try to parse our arguments and

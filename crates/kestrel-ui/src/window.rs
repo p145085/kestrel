@@ -35,6 +35,12 @@ struct State {
     order: Vec<BufferId>,
     current: BufferId,
     nick: String,
+    /// What to call the server buffer: the address we were pointed at.
+    server: String,
+    /// Whether there is still a connection behind this window.
+    connected: bool,
+    /// Where this window was last pointed, so it can be pointed there again.
+    last: Option<(ConnectConfig, SessionConfig)>,
 }
 
 /// The window and the things that change inside it.
@@ -48,7 +54,9 @@ pub struct Window {
     members_pane: gtk::Widget,
     tags: gtk::TextTagTable,
     state: Rc<RefCell<State>>,
-    commands: mpsc::UnboundedSender<UiCommand>,
+    /// Swapped out when the window is given a new connection, so every clone
+    /// of this handle starts talking to the new one at the same moment.
+    commands: Rc<RefCell<mpsc::UnboundedSender<UiCommand>>>,
     /// Set while the sidebar is being changed from code, so the selection
     /// handler does not treat its own work as a click from the user.
     selecting: Rc<RefCell<bool>>,
@@ -155,8 +163,11 @@ impl Window {
                 order: Vec::new(),
                 current: SERVER_BUFFER.to_owned(),
                 nick: String::new(),
+                server: String::new(),
+                connected: true,
+                last: None,
             })),
-            commands,
+            commands: Rc::new(RefCell::new(commands)),
             selecting: Rc::new(RefCell::new(false)),
         };
 
@@ -182,7 +193,7 @@ impl Window {
             let buffer = ui.state.borrow().current.clone();
             // An unbounded sender never blocks, which is why it is safe to use
             // one straight from a GTK handler.
-            let _ = ui.commands.send(UiCommand::Input { buffer, text });
+            let _ = ui.commands.borrow().send(UiCommand::Input { buffer, text });
         });
 
         let ui = self.clone();
@@ -203,10 +214,24 @@ impl Window {
     pub fn handle(&self, event: AppEvent) {
         match event {
             AppEvent::Connecting { server } => {
+                {
+                    let mut state = self.state.borrow_mut();
+                    state.server.clone_from(&server);
+                    state.connected = true;
+                }
                 self.append(
                     SERVER_BUFFER,
                     &Line::status(format!("connecting to {server}")),
                 );
+                self.rebuild_sidebar();
+                self.redraw_topic();
+                self.update_actions();
+            }
+            AppEvent::ServerInfo { name, version } => {
+                if let Some(entry) = self.state.borrow_mut().buffers.get_mut(SERVER_BUFFER) {
+                    entry.topic = format!("{name} — {version}");
+                }
+                self.redraw_topic();
             }
             AppEvent::Registered { nick } | AppEvent::NickChanged { nick } => {
                 self.state.borrow_mut().nick = nick;
@@ -235,13 +260,15 @@ impl Window {
                 }
             }
             AppEvent::Disconnected { reason } => {
+                self.state.borrow_mut().connected = false;
                 self.append(
                     SERVER_BUFFER,
                     &Line::error(format!("disconnected: {reason}")),
                 );
                 self.entry.set_sensitive(false);
                 self.entry
-                    .set_placeholder_text(Some("disconnected — close the window to leave"));
+                    .set_placeholder_text(Some("disconnected — Server ▸ Reconnect"));
+                self.update_actions();
             }
         }
     }
@@ -368,6 +395,11 @@ impl Window {
     fn rebuild_sidebar(&self) {
         let rows: Vec<(BufferId, String, bool)> = {
             let mut state = self.state.borrow_mut();
+            let server_label = if state.server.is_empty() {
+                SERVER_LABEL.to_owned()
+            } else {
+                state.server.clone()
+            };
             // Channels and conversations sort together under the server, which
             // stays first because it is where errors land.
             let mut names: Vec<BufferId> = state.buffers.keys().cloned().collect();
@@ -381,7 +413,7 @@ impl Window {
                 .map(|name| {
                     let unread = state.buffers.get(&name).is_some_and(|b| b.unread);
                     let label = if name.is_empty() {
-                        SERVER_LABEL.to_owned()
+                        server_label.clone()
                     } else {
                         name.clone()
                     };
@@ -465,13 +497,15 @@ impl Window {
             .get(&state.current)
             .map(|b| b.topic.clone())
             .unwrap_or_default();
-        let name = if state.current.is_empty() {
-            SERVER_LABEL
+        let name = if !state.current.is_empty() {
+            state.current.clone()
+        } else if state.server.is_empty() {
+            SERVER_LABEL.to_owned()
         } else {
-            &state.current
+            state.server.clone()
         };
         self.topic.set_text(&if topic.is_empty() {
-            name.to_owned()
+            name
         } else {
             format!("{name} — {topic}")
         });
@@ -519,8 +553,23 @@ impl Window {
         // application outlives all of its windows.
         let application = app.clone();
         let action = gio::SimpleAction::new("connect", None);
-        action.connect_activate(move |_, _| crate::connect::show(&application));
+        let from = self.clone();
+        action.connect_activate(move |_, _| crate::connect::show(&application, Some(from.clone())));
         window.add_action(&action);
+
+        // Redialling where we already were, which after a dropped connection
+        // is almost always what is wanted and needs no form to say so.
+        self.add_action(window, "reconnect", |ui| {
+            let Some((connect, session)) = ui.last_connection() else {
+                return;
+            };
+            if let Err(error) = ui.redial(connect, session) {
+                ui.append(
+                    SERVER_BUFFER,
+                    &Line::error(format!("could not reconnect: {error:#}")),
+                );
+            }
+        });
 
         self.add_action(window, "names", |ui| ui.run("/names"));
         self.add_action(window, "part", |ui| ui.run("/part"));
@@ -600,12 +649,21 @@ impl Window {
         let current = self.state.borrow().current.clone();
         let in_channel = current.starts_with('#') || current.starts_with('&');
 
-        for name in ["part", "topic", "names"] {
+        let connected = self.state.borrow().connected;
+        for (name, enabled) in [
+            ("part", in_channel && connected),
+            ("topic", in_channel && connected),
+            ("names", in_channel && connected),
+            (
+                "reconnect",
+                !connected && self.state.borrow().last.is_some(),
+            ),
+        ] {
             if let Some(action) = window
                 .lookup_action(name)
                 .and_downcast::<gio::SimpleAction>()
             {
-                action.set_enabled(in_channel);
+                action.set_enabled(enabled);
             }
         }
     }
@@ -693,7 +751,7 @@ impl Window {
     /// Put something through the same path as typing it.
     fn run(&self, input: &str) {
         let buffer = self.state.borrow().current.clone();
-        let _ = self.commands.send(UiCommand::Input {
+        let _ = self.commands.borrow().send(UiCommand::Input {
             buffer,
             text: input.to_owned(),
         });
@@ -710,7 +768,7 @@ impl Window {
 
     /// Ask the connection to leave.
     pub fn quit(&self) {
-        let _ = self.commands.send(UiCommand::Quit {
+        let _ = self.commands.borrow().send(UiCommand::Quit {
             reason: "kestrel".to_owned(),
         });
     }
@@ -726,8 +784,9 @@ pub fn open(
     connect: ConnectConfig,
     session: SessionConfig,
 ) -> anyhow::Result<()> {
-    let (commands, events) = kestrel_ui::connection::start(connect, session)?;
+    let (commands, events) = kestrel_ui::connection::start(connect.clone(), session.clone())?;
     let (ui, window) = Window::build(app, commands);
+    ui.state.borrow_mut().last = Some((connect, session));
     pump(ui.clone(), events);
 
     // Leaving properly rather than dropping the socket, so the server and
@@ -739,13 +798,54 @@ pub fn open(
     Ok(())
 }
 
+impl Window {
+    /// Whether this window still has a connection behind it.
+    #[must_use]
+    pub fn is_connected(&self) -> bool {
+        self.state.borrow().connected
+    }
+
+    /// Point this window at a server, in place.
+    ///
+    /// Reuses the window rather than opening another, because a disconnected
+    /// one is of no further use and its scrollback is worth keeping: what was
+    /// said before the connection dropped is usually what you want to see
+    /// after it comes back.
+    pub fn redial(&self, connect: ConnectConfig, session: SessionConfig) -> anyhow::Result<()> {
+        let (commands, events) = kestrel_ui::connection::start(connect.clone(), session.clone())?;
+        *self.commands.borrow_mut() = commands;
+        {
+            let mut state = self.state.borrow_mut();
+            state.connected = true;
+            state.last = Some((connect, session));
+        }
+
+        self.entry.set_sensitive(true);
+        self.entry
+            .set_placeholder_text(Some("Say something, or /help"));
+        self.update_actions();
+
+        // The previous pump ends on its own once the old connection drops its
+        // sender, so there is nothing to tear down here.
+        pump(self.clone(), events);
+        Ok(())
+    }
+
+    /// Where this window was last pointed.
+    #[must_use]
+    pub fn last_connection(&self) -> Option<(ConnectConfig, SessionConfig)> {
+        self.state.borrow().last.clone()
+    }
+}
+
 /// Every action the menu may refer to.
 ///
 /// Named in one place so a menu entry pointing at an action nobody installed
 /// cannot slip through: GTK renders such an entry greyed out and says nothing,
 /// which looks exactly like a feature that is merely unavailable.
-const ACTIONS: [&str; 12] = [
+const ACTIONS: [&str; 13] = [
     "connect",
+    "reconnect",
     "join",
     "query",
     "nick",
@@ -766,6 +866,7 @@ const ACTIONS: [&str; 12] = [
 fn menu_model() -> gio::Menu {
     let server = gio::Menu::new();
     server.append(Some("New Connection…"), Some("win.connect"));
+    server.append(Some("Reconnect"), Some("win.reconnect"));
     server.append(Some("Join Channel…"), Some("win.join"));
     server.append(Some("Open Conversation…"), Some("win.query"));
     server.append(Some("Change Nickname…"), Some("win.nick"));

@@ -15,7 +15,7 @@ use crate::window;
 // Building a form is linear by nature: every field is three lines and
 // splitting them across functions would only hide the layout.
 #[allow(clippy::too_many_lines)]
-pub fn show(app: &gtk::Application) {
+pub fn show(app: &gtk::Application, from: Option<window::Window>) {
     let server = entry("127.0.0.1");
     let port = entry("6667");
     let nick = entry(&default_nick());
@@ -109,6 +109,9 @@ pub fn show(app: &gtk::Application) {
     let go = {
         let app = app.clone();
         let dialog = dialog.clone();
+        // A window whose connection has ended is reused rather than left
+        // behind as a dead one beside a live one.
+        let reuse = from.filter(|window| !window.is_connected());
         let fields = Fields {
             server: server.clone(),
             port: port.clone(),
@@ -120,7 +123,11 @@ pub fn show(app: &gtk::Application) {
         let problem = problem.clone();
         move || match fields.read() {
             Ok((connect, session)) => {
-                if let Err(error) = window::open(&app, connect, session) {
+                let opened = match &reuse {
+                    Some(window) => window.redial(connect, session),
+                    None => window::open(&app, connect, session),
+                };
+                if let Err(error) = opened {
                     problem.set_text(&format!("{error:#}"));
                     problem.set_visible(true);
                     return;

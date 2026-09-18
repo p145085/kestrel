@@ -288,6 +288,20 @@ impl Translator {
                 };
                 vec![server_line(reply)]
             }
+            // RPL_MYINFO: the server's name for itself, then its software.
+            Event::Numeric {
+                code: 4, params, ..
+            } if params.len() >= 2 => {
+                let name = text(&params[0]);
+                let version = text(&params[1]);
+                vec![
+                    AppEvent::ServerInfo {
+                        name: name.clone(),
+                        version: version.clone(),
+                    },
+                    server_line(Line::status(format!("{name} running {version}"))),
+                ]
+            }
             Event::Numeric {
                 code,
                 params,
@@ -689,17 +703,37 @@ mod tests {
     #[test]
     fn a_numeric_without_trailing_text_keeps_all_its_parameters() {
         let mut translator = registered("me");
+        // 302 is "RPL_USERHOST", whose reply has no trailing form.
         let (_, line) = only_line(translator.translate(Event::Numeric {
-            code: 4,
-            params: vec![
-                b"irc.example".to_vec(),
-                b"kestreld".to_vec(),
-                b"io".to_vec(),
-            ],
+            code: 302,
+            params: vec![b"alice=+~a@host".to_vec(), b"bob=+~b@host".to_vec()],
             text: None,
         }));
 
-        assert_eq!(line.text, "irc.example kestreld io");
+        assert_eq!(line.text, "alice=+~a@host bob=+~b@host");
+    }
+
+    #[test]
+    fn the_server_says_what_it_is() {
+        let mut translator = registered("me");
+        let events = translator.translate(Event::Numeric {
+            code: 4,
+            params: vec![
+                b"irc.example".to_vec(),
+                b"kestreld-0.0.1".to_vec(),
+                b"io".to_vec(),
+            ],
+            text: None,
+        });
+
+        let info = events.iter().find_map(|event| match event {
+            AppEvent::ServerInfo { name, version } => Some((name.clone(), version.clone())),
+            _ => None,
+        });
+        assert_eq!(
+            info,
+            Some(("irc.example".to_owned(), "kestreld-0.0.1".to_owned()))
+        );
     }
 
     #[test]

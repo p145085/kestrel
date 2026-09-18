@@ -39,6 +39,11 @@ pub struct Config {
     /// How many channels one client may be in at once.
     pub max_channels_per_client: usize,
     /// Seconds a connection may stay silent before it is closed.
+    /// How long a connection may go without saying anything.
+    ///
+    /// The server asks after half of it and only gives up at the end, so
+    /// this is the total patience rather than the silence a client is
+    /// allowed before being questioned.
     pub idle_timeout_secs: u64,
     /// Seconds a connection may take to finish registering.
     pub registration_timeout_secs: u64,
