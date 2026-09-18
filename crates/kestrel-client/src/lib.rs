@@ -7,6 +7,8 @@
 
 pub mod calls;
 pub mod notice;
+pub mod store;
 
 pub use calls::{Calls, TaggedMediaEvent};
 pub use notice::{Level, Notice};
+pub use store::Store;

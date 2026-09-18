@@ -943,6 +943,9 @@ dependencies = [
  "kestrel-net",
  "kestrel-proto",
  "kestrel-rtc-proto",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
 ]
 

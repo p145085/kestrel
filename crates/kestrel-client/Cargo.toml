@@ -17,6 +17,11 @@ kestrel-proto.workspace = true
 kestrel-rtc-proto.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 anyhow.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

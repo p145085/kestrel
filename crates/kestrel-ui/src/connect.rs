@@ -8,6 +8,7 @@
 use gtk::prelude::*;
 use kestrel_net::ConnectConfig;
 use kestrel_session::SessionConfig;
+use kestrel_session::config::Sasl;
 
 use kestrel_ui::connection::CallOptions;
 
@@ -22,6 +23,10 @@ pub fn show(app: &gtk::Application, from: Option<window::Window>, options: &Call
     let port = entry("6667");
     let nick = entry(&default_nick());
     let channels = entry("#test");
+    let account = entry("");
+    let password = entry("");
+    password.set_visibility(false);
+    password.set_input_purpose(gtk::InputPurpose::Password);
 
     let tls = gtk::CheckButton::with_label("Connect with TLS");
     let insecure = gtk::CheckButton::with_label("Accept any certificate");
@@ -66,6 +71,8 @@ pub fn show(app: &gtk::Application, from: Option<window::Window>, options: &Call
         ("Port", &port),
         ("Nickname", &nick),
         ("Channels", &channels),
+        ("Account", &account),
+        ("Password", &password),
     ]
     .into_iter()
     .enumerate()
@@ -80,8 +87,22 @@ pub fn show(app: &gtk::Application, from: Option<window::Window>, options: &Call
         );
         grid.attach(field, 1, row, 1, 1);
     }
-    grid.attach(&tls, 1, 4, 1, 1);
-    grid.attach(&insecure, 1, 5, 1, 1);
+    // Said plainly, because an unauthenticated call cannot pin a key to
+    // anybody: the phrase still proves nobody is in the middle right now, but
+    // nothing carries over to the next call.
+    grid.attach(
+        &gtk::Label::builder()
+            .label("Leave empty to connect without an account.\nCalls can then be verified, but not remembered.")
+            .xalign(0.0)
+            .css_classes(["dim-label"])
+            .build(),
+        1,
+        6,
+        1,
+        1,
+    );
+    grid.attach(&tls, 1, 7, 1, 1);
+    grid.attach(&insecure, 1, 8, 1, 1);
 
     let problem = gtk::Label::builder()
         .xalign(0.0)
@@ -89,7 +110,7 @@ pub fn show(app: &gtk::Application, from: Option<window::Window>, options: &Call
         .visible(false)
         .build();
     problem.add_css_class("error");
-    grid.attach(&problem, 0, 6, 2, 1);
+    grid.attach(&problem, 0, 9, 2, 1);
 
     let cancel = gtk::Button::with_label("Cancel");
     let connect = gtk::Button::with_label("Connect");
@@ -99,7 +120,7 @@ pub fn show(app: &gtk::Application, from: Option<window::Window>, options: &Call
     buttons.set_halign(gtk::Align::End);
     buttons.append(&cancel);
     buttons.append(&connect);
-    grid.attach(&buttons, 0, 7, 2, 1);
+    grid.attach(&buttons, 0, 10, 2, 1);
 
     let dialog = gtk::ApplicationWindow::builder()
         .application(app)
@@ -121,6 +142,8 @@ pub fn show(app: &gtk::Application, from: Option<window::Window>, options: &Call
             port: port.clone(),
             nick: nick.clone(),
             channels: channels.clone(),
+            account: account.clone(),
+            password: password.clone(),
             tls: tls.clone(),
             insecure: insecure.clone(),
         };
@@ -148,7 +171,7 @@ pub fn show(app: &gtk::Application, from: Option<window::Window>, options: &Call
     let clicked = go.clone();
     connect.connect_clicked(move |_| clicked());
     // Enter anywhere in the form connects, which is what every other client does.
-    for field in [&server, &port, &nick, &channels] {
+    for field in [&server, &port, &nick, &channels, &account, &password] {
         let activated = go.clone();
         field.connect_activate(move |_| activated());
     }
@@ -167,6 +190,8 @@ struct Fields {
     port: gtk::Entry,
     nick: gtk::Entry,
     channels: gtk::Entry,
+    account: gtk::Entry,
+    password: gtk::Entry,
     tls: gtk::CheckButton,
     insecure: gtk::CheckButton,
 }
@@ -217,6 +242,18 @@ impl Fields {
             .filter(|name| !name.is_empty())
             .map(String::into_bytes)
             .collect();
+
+        let account = self.account.text().trim().to_owned();
+        if !account.is_empty() {
+            let password = self.password.text().to_string();
+            if password.is_empty() {
+                return Err("An account needs a password.".to_owned());
+            }
+            session.sasl = Some(Sasl::Plain {
+                account: account.into_bytes(),
+                password: password.into_bytes(),
+            });
+        }
 
         Ok((connect, session))
     }

@@ -194,6 +194,9 @@ fn parse_args() -> Result<Option<Options>> {
 }
 
 #[tokio::main]
+// Starting up is a straight line: parse, connect, wire up media, then loop.
+// Splitting it would scatter the order things must happen in.
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
     let Some(options) = parse_args()? else {
         return Ok(());
@@ -234,6 +237,28 @@ async fn main() -> Result<()> {
         ui::warn(&format!("calls are unavailable: {error}"));
     }
     let mut calls = kestrel_client::Calls::new(media_tx);
+    match kestrel_client::Store::in_config_directory() {
+        Some(store) => {
+            if let Err(error) = calls.remember_in(store) {
+                // Carrying on with a fresh key is better than refusing to
+                // start, but the user has to know their pinned keys are not
+                // the ones being used.
+                ui::warn(&format!("identity not remembered: {error:#}"));
+            }
+        }
+        None => ui::warn("nowhere to keep an identity; this run will look like a stranger"),
+    }
+    match kestrel_client::Store::in_config_directory() {
+        Some(store) => {
+            if let Err(error) = calls.remember_in(store) {
+                // Carrying on with a fresh key is better than refusing to
+                // start, but the user has to know their pinned keys are not
+                // the ones being used.
+                ui::warn(&format!("identity not remembered: {error:#}"));
+            }
+        }
+        None => ui::warn("nowhere to keep an identity; this run will look like a stranger"),
+    }
     if options.test_media {
         calls.use_test_media();
     }
@@ -258,7 +283,12 @@ async fn main() -> Result<()> {
                     match session_event {
                         Event::Call { call_id, verb, from, params } => {
                             if let Err(error) = calls.on_call_message(
-                                &handle, call_id, verb, &from.nick, params,
+                                &handle,
+                                call_id,
+                                verb,
+                                &from.nick,
+                                from.account.as_deref(),
+                                params,
                             ) {
                                 ui::warn(&error.to_string());
                             }

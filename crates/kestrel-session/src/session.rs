@@ -183,6 +183,23 @@ impl Session {
         let command = msg.command().to_ascii_uppercase();
 
         match command.as_slice() {
+            // The reply to creating an account. Passed through as a
+            // standard reply so a client shows it like any other
+            // outcome, rather than dropping it as an unknown command.
+            b"REGISTER" | b"VERIFY" => {
+                let detail = msg
+                    .params()
+                    .iter()
+                    .map(|p| String::from_utf8_lossy(p).into_owned())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                out.emit(Event::StandardReply {
+                    severity: b"NOTE".to_vec(),
+                    command: msg.command().to_vec(),
+                    code: Vec::new(),
+                    text: detail.into_bytes(),
+                });
+            }
             b"PING" => {
                 let token = msg.param(0).unwrap_or(b"").to_vec();
                 out.send(MessageBuf::new("PONG").trailing(token));

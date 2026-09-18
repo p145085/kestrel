@@ -74,6 +74,10 @@ pub const DEFAULT_CAPS: &[&str] = &[
     "setname",
     "standard-replies",
     "userhost-in-names",
+    // Creating an account. Without this there is no account, and
+    // without an account a verified key has nothing to be verified
+    // against.
+    "draft/account-registration",
     // Calls. Servers that do not carry them simply will not offer it.
     "kestrel.chat/rtc",
 ];

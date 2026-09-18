@@ -108,7 +108,7 @@ pub fn prompt_password(prompt: &str) -> Result<String> {
 ///
 /// A client that answers `/help` with "no such command" is telling the
 /// user it has nothing to offer, which is the opposite of the truth.
-const HELP: [&str; 16] = [
+const HELP: [&str; 17] = [
     "/join #channel      join a channel",
     "/part [#channel]    leave a channel",
     "/msg nick text      send a private message",
@@ -118,6 +118,7 @@ const HELP: [&str; 16] = [
     "/topic [text]       show or set the channel topic",
     "/names [#channel]   list the members of a channel",
     "/whois nick         ask about somebody",
+    "/register acc pass  create an account on this server",
     "/raw LINE           send a raw IRC line",
     "/call nick|#channel start a call",
     "/answer             accept an incoming call",
@@ -182,6 +183,24 @@ pub fn handle_input(
             for entry in HELP {
                 status(entry);
             }
+        }
+        "register" => {
+            let mut parts = argument.splitn(2, char::is_whitespace);
+            let (Some(account), Some(password)) = (parts.next(), parts.next()) else {
+                bail!("usage: /register <account> <password>");
+            };
+            if account.is_empty() || password.is_empty() {
+                bail!("usage: /register <account> <password>");
+            }
+            // The email field is required by the specification and
+            // unused here; `*` is what it means to decline to give one.
+            handle.send(
+                MessageBuf::new("REGISTER")
+                    .param(account)
+                    .param("*")
+                    .param(password),
+            )?;
+            status(&format!("registering {account}"));
         }
         "join" | "j" => {
             if argument.is_empty() {

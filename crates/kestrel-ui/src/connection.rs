@@ -66,6 +66,24 @@ pub async fn run(
         )
         .await;
     }
+    match kestrel_client::Store::in_config_directory() {
+        Some(store) => {
+            if let Err(error) = state.calls.remember_in(store) {
+                show(
+                    &events,
+                    Line::error(format!("identity not remembered: {error:#}")),
+                )
+                .await;
+            }
+        }
+        None => {
+            show(
+                &events,
+                Line::error("nowhere to keep an identity; this run will look like a stranger"),
+            )
+            .await;
+        }
+    }
     state.configure(&options);
     state.flush(&events).await;
 
@@ -199,10 +217,14 @@ impl State {
                         from,
                         params,
                     } => {
-                        if let Err(error) = self
-                            .calls
-                            .on_call_message(handle, call_id, verb, &from.nick, params)
-                        {
+                        if let Err(error) = self.calls.on_call_message(
+                            handle,
+                            call_id,
+                            verb,
+                            &from.nick,
+                            from.account.as_deref(),
+                            params,
+                        ) {
                             show(events, Line::error(error.to_string())).await;
                         }
                     }

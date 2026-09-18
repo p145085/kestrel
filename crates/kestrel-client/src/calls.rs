@@ -20,6 +20,7 @@ use kestrel_rtc_proto::MediaWanted;
 use tokio::sync::mpsc;
 
 use crate::notice::{Level, Notice};
+use crate::store::Store;
 
 /// A media event tagged with the peer it came from.
 #[derive(Debug)]
@@ -69,6 +70,8 @@ pub struct Calls {
     video_wanted: Vec<String>,
     /// Whether our own picture still needs somewhere to go.
     self_view_wanted: bool,
+    /// Where our identity and pinned keys are kept, if anywhere.
+    store: Option<Store>,
 }
 
 struct ActiveCall {
@@ -130,6 +133,45 @@ impl Calls {
             notices: Vec::new(),
             video_wanted: Vec::new(),
             self_view_wanted: false,
+            store: None,
+        }
+    }
+
+    /// Keep this client's identity and pinned keys in a store.
+    ///
+    /// Adopts whatever is already there, so the key a peer verified last
+    /// week is still the key they verified. Without this every run is a
+    /// stranger: each call reports the other side as new, and a key that
+    /// changed because somebody is impersonating them looks exactly like a
+    /// key that changed because they reinstalled.
+    pub fn remember_in(&mut self, store: Store) -> Result<()> {
+        let (identity, known) = store.load()?;
+        self.identity = identity;
+        self.known = known;
+        self.store = Some(store);
+        Ok(())
+    }
+
+    /// Take what a call learned about a peer's key and keep it.
+    ///
+    /// Each call works on its own copy of the table, so what it observes
+    /// or verifies is otherwise lost when the call ends -- including
+    /// within one session, which would make verifying somebody good for
+    /// exactly one conversation.
+    fn remember(&mut self, call_id: &str) {
+        let Some(entry) = self.active.get(call_id) else {
+            return;
+        };
+        self.known = entry.call.known_peers().clone();
+
+        let Some(store) = &self.store else {
+            return;
+        };
+        if let Err(error) = store.save(&self.identity, &self.known) {
+            // Said rather than swallowed: a user who thinks a key is
+            // pinned and finds it is not has been misled about the one
+            // guarantee this is here to give.
+            self.warn(format!("could not remember this key: {error:#}"));
         }
     }
 
@@ -386,15 +428,17 @@ impl Calls {
 
     /// Confirm that a short authentication string matched.
     pub fn verify(&mut self) -> Result<()> {
-        let Some(entry) = self.active.values_mut().next() else {
+        let Some((call_id, entry)) = self.active.iter_mut().next() else {
             bail!("no call in progress");
         };
+        let call_id = call_id.clone();
         let peers: Vec<String> = entry.call.peers().map(str::to_owned).collect();
         let mut any = false;
         for peer in peers {
             any |= entry.call.mark_verified(&peer);
         }
         if any {
+            self.remember(&call_id);
             self.say("verified; this key will be remembered");
         } else {
             self.warn(
@@ -411,10 +455,15 @@ impl Calls {
         call_id: &[u8],
         verb: &[u8],
         from: &[u8],
+        account: Option<&[u8]>,
         params: &[Vec<u8>],
     ) -> Result<()> {
         let call_id = String::from_utf8_lossy(call_id).into_owned();
         let peer = String::from_utf8_lossy(from).into_owned();
+        // Who the server says this peer is logged in as, from `account-tag`.
+        // Without it a key has nothing to be pinned against, so verification
+        // holds only for the call it happened in.
+        let account = account.map(|name| String::from_utf8_lossy(name).into_owned());
         let text = |index: usize| -> String {
             params
                 .get(index)
@@ -463,7 +512,7 @@ impl Calls {
                 let Some(entry) = self.active.get_mut(&call_id) else {
                     return Ok(());
                 };
-                match entry.call.on_signal(&peer, None, &payload) {
+                match entry.call.on_signal(&peer, account.as_deref(), &payload) {
                     Ok(outcome) => self.apply(handle, &call_id, outcome)?,
                     // A payload we cannot read is not worth dropping the call
                     // over, but it is worth saying: it means somebody is out
@@ -699,6 +748,7 @@ impl Calls {
                 }
             }
             Event::Verify { peer, sas, trust } => {
+                self.remember(call_id);
                 match trust {
                     Trust::Changed { .. } => self.warn_in(
                         call_id,

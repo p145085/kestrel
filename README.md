@@ -59,7 +59,8 @@ something you would daily-drive.
 - [x] `kestrel-media` — GStreamer engine, with camera selection on Windows
 - [x] Calls end to end — **two clients call each other through `kestreld`,
       with a real camera or with test patterns**
-- [ ] TURN credentials, SFU handoff, and identity that survives a restart
+- [x] Identity that survives a restart, so a verified key stays verified
+- [ ] TURN credentials, SFU handoff, and mesh calls sharing one camera
 
 ## Building the media engine and the interface
 
@@ -122,6 +123,28 @@ has to be set up.
 For a call, use the **Call** menu in the window, or `/call <nick>` and
 `/answer` in the terminal client. Both ends show a four-word phrase; say it
 aloud to check nobody is in the middle, and confirm it once it matches.
+
+### Accounts, and why a call asks for one
+
+A key is pinned against an account, not a nickname: a nickname is whoever
+holds it this second, an account is a person. Without one, the spoken phrase
+still proves nobody is in the middle of *this* call, but nothing carries over
+to the next one -- so the client says so rather than letting you believe
+otherwise.
+
+```powershell
+# in the terminal client, once connected
+/register myname mypassword
+# then reconnect with it
+kestrel 127.0.0.1:6667 --sasl myname --sasl-pass mypassword
+```
+
+The window has Account and Password fields in its connection dialog.
+
+Your identity and the keys you have pinned are kept in
+`%APPDATA%\kestrel\identity.json` (or `~/.config/kestrel/identity.json`).
+Set `KESTREL_IDENTITY` to use a different one, which is how two clients on
+one machine get separate identities.
 
 `--test-media` uses test patterns instead of your camera, and
 `--list-cameras` (terminal client) shows what is available -- worth
