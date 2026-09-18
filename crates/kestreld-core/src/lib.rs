@@ -34,6 +34,7 @@ pub mod mask;
 pub mod moderation;
 pub mod modes;
 mod mutate;
+pub mod queries;
 pub mod register;
 pub mod server;
 

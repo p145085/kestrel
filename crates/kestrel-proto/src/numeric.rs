@@ -109,6 +109,11 @@ pub const RPL_WHOISSECURE: u16 = 671;
 /// End of a `WHOIS` reply.
 pub const RPL_ENDOFWHOIS: u16 = 318;
 
+/// Reply to `ISON`: which of the queried nicknames are online.
+pub const RPL_ISON: u16 = 303;
+/// Reply to `USERHOST`.
+pub const RPL_USERHOST: u16 = 302;
+
 // Errors.
 
 /// No such nickname.

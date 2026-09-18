@@ -127,6 +127,14 @@ impl Server {
 
     // --- internal helpers --------------------------------------------------
 
+    pub(crate) fn clients_map(&self) -> &HashMap<ClientId, Client> {
+        &self.clients
+    }
+
+    pub(crate) fn channels_map(&self) -> &HashMap<Vec<u8>, Channel> {
+        &self.channels
+    }
+
     pub(crate) fn clients_mut(&mut self) -> &mut HashMap<ClientId, Client> {
         &mut self.clients
     }
@@ -324,6 +332,10 @@ impl Server {
             b"LUSERS" => self.send_lusers(id, out),
             b"AWAY" => self.cmd_away(id, msg, out),
             b"WHOIS" => self.cmd_whois(id, msg, out),
+            b"WHO" => self.cmd_who(id, msg, out),
+            b"LIST" => self.cmd_list(id, msg, out),
+            b"ISON" => self.cmd_ison(id, msg, out),
+            b"USERHOST" => self.cmd_userhost(id, msg, out),
             _ => {
                 out.push(Action::send(
                     id,
