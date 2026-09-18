@@ -32,6 +32,8 @@ pub fn supported() -> Vec<String> {
         "multi-prefix".to_owned(),
         "server-time".to_owned(),
         "setname".to_owned(),
+        "standard-replies".to_owned(),
+        "draft/account-registration=before-connect".to_owned(),
     ]
 }
 

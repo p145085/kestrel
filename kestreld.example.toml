@@ -39,6 +39,10 @@ registration_timeout_secs = 60
 # A password every client must supply with PASS, if you want one.
 # password = "..."
 
+# Where registered accounts are saved. Without this, accounts created with
+# REGISTER exist only in memory and vanish when the server stops.
+accounts_file = "data/accounts.json"
+
 # Accounts created at start-up, for bootstrapping a new server.
 # Passwords here are in the clear: fine for getting started, not for running
 # a real network. Nothing persists yet, so accounts are recreated each start.

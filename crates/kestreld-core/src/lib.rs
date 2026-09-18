@@ -25,6 +25,7 @@
 //! # Ok::<(), kestrel_proto::ParseError>(())
 //! ```
 
+pub mod accounts;
 pub mod authenticate;
 pub mod caps;
 pub mod channel;

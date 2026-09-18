@@ -51,6 +51,8 @@ pub struct Server {
     created_at: u64,
     max_local_users: usize,
     accounts: AccountStore,
+    /// Set when the account store changed and has not yet been saved.
+    accounts_changed: bool,
     /// The most recent timestamp handed to [`Server::handle`].
     ///
     /// Teardown paths — a quit, a dropped socket — produce messages too,
@@ -73,6 +75,7 @@ impl Server {
             created_at: now,
             max_local_users: 0,
             accounts: AccountStore::new(),
+            accounts_changed: false,
             last_seen: now,
         }
     }
@@ -86,6 +89,19 @@ impl Server {
     /// The account store, mutably, for registration and loading from disk.
     pub fn accounts_mut(&mut self) -> &mut AccountStore {
         &mut self.accounts
+    }
+
+    /// Note that the account store needs saving.
+    pub fn mark_accounts_changed(&mut self) {
+        self.accounts_changed = true;
+    }
+
+    /// Whether the account store has changed since this was last called.
+    ///
+    /// Clears the flag, so a caller that polls this after each command
+    /// writes once per change rather than once per command.
+    pub fn take_accounts_changed(&mut self) -> bool {
+        std::mem::take(&mut self.accounts_changed)
     }
 
     /// Record the fingerprint of a client's TLS certificate.
@@ -346,6 +362,7 @@ impl Server {
             b"CAP"
                 | b"PASS"
                 | b"AUTHENTICATE"
+                | b"REGISTER"
                 | b"NICK"
                 | b"USER"
                 | b"QUIT"
@@ -368,6 +385,7 @@ impl Server {
             b"CAP" => self.cmd_cap(id, msg, now, out),
             b"PASS" => self.cmd_pass(id, msg, out),
             b"AUTHENTICATE" => self.cmd_authenticate(id, msg, out),
+            b"REGISTER" => self.cmd_register(id, msg, now, out),
             b"NICK" => self.cmd_nick(id, msg, now, out),
             b"USER" => self.cmd_user(id, msg, now, out),
             b"PING" => self.cmd_ping(id, msg, out),

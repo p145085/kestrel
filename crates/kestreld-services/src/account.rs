@@ -5,9 +5,13 @@ use std::collections::HashMap;
 use crate::password;
 
 /// A registered account.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Account {
     /// The account name in the case it was registered with.
+    ///
+    /// Stored as bytes because IRC has no guaranteed encoding, and written
+    /// as a string on disk so the file stays readable by a human fixing it.
+    #[serde(with = "byte_string")]
     pub name: Vec<u8>,
     /// Argon2 PHC string, or `None` for an account that authenticates only by
     /// client certificate.
@@ -200,6 +204,22 @@ impl AccountStore {
             Some(account) => AuthOutcome::Success(account.name.clone()),
             None => AuthOutcome::Failure,
         }
+    }
+}
+
+/// Serialise a byte vector as a UTF-8 string where possible.
+///
+/// Account names are restricted to ASCII, so this is lossless in practice
+/// while keeping the saved file legible.
+mod byte_string {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&String::from_utf8_lossy(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        String::deserialize(d).map(String::into_bytes)
     }
 }
 

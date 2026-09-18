@@ -39,7 +39,7 @@ Early development. Nothing is usable yet.
 - [x] `kestrel-proto` — sans-io IRC codec: messages, IRCv3 tags, sources, casemapping, numerics
 - [x] `kestrel-proto` shares one codec between client and server, so the wire format cannot drift
 - [x] `kestreld-core` — registration, channels, modes, bans, messaging, queries,
-      and the IRCv3 capabilities a modern client expects
+      account registration, and the IRCv3 capabilities a modern client expects
 - [x] `kestreld-services` — accounts, Argon2 password storage, SASL PLAIN and EXTERNAL
 - [~] `kestreld` — the server binary. Runs over plain TCP; **no TLS yet**, and
       nothing is persisted across restarts

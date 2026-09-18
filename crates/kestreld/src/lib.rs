@@ -8,6 +8,7 @@
 
 pub mod config;
 pub mod connection;
+pub mod persist;
 pub mod tls;
 
 use std::collections::HashMap;
@@ -68,6 +69,12 @@ pub async fn bind(config: &Config) -> Result<Vec<TcpListener>> {
 /// Build the server state machine from configuration.
 fn build_server(config: &Config) -> Server {
     let mut server = Server::new(config.to_server_config(), now_unix());
+
+    // Saved accounts load first, so a config entry for an account that has
+    // since changed its password does not quietly reset it.
+    if let Some(path) = &config.accounts_file {
+        persist::load_into(server.accounts_mut(), path);
+    }
     for account in &config.accounts {
         match server.accounts_mut().register(
             account.name.as_bytes(),
@@ -151,6 +158,7 @@ where
 {
     let mut server = build_server(&config);
     prepare(&mut server);
+    let accounts_file = config.accounts_file.clone();
     let (events_tx, mut events_rx) = mpsc::channel::<Event>(EVENT_QUEUE);
     let idle_timeout = Duration::from_secs(config.idle_timeout_secs);
 
@@ -192,6 +200,19 @@ where
         let mut actions = Vec::new();
         handle_event(&mut server, &mut outbound, event, &mut actions);
         dispatch(&actions, &mut outbound);
+
+        // Writing happens off the event loop: the store is small, but a
+        // slow disk must not stall every other client while it finishes.
+        if server.take_accounts_changed()
+            && let Some(path) = accounts_file.clone()
+        {
+            let snapshot: Vec<_> = server.accounts().iter().cloned().collect();
+            tokio::task::spawn_blocking(move || {
+                if let Err(error) = persist::save(&path, snapshot) {
+                    error!(path = %path.display(), %error, "could not save accounts");
+                }
+            });
+        }
     }
 
     for task in accept_tasks {

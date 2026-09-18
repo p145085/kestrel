@@ -42,6 +42,9 @@ pub struct Config {
     pub idle_timeout_secs: u64,
     /// Seconds a connection may take to finish registering.
     pub registration_timeout_secs: u64,
+    /// Where registered accounts are saved. Unset means they are not
+    /// persisted and vanish when the server stops.
+    pub accounts_file: Option<PathBuf>,
     /// Accounts to create at start-up, for bootstrapping a new server.
     pub accounts: Vec<AccountConfig>,
 }
@@ -77,6 +80,7 @@ impl Default for Config {
             max_channels_per_client: 128,
             idle_timeout_secs: 300,
             registration_timeout_secs: 60,
+            accounts_file: None,
             accounts: Vec::new(),
         }
     }
