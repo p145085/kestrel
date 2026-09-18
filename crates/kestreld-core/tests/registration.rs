@@ -133,9 +133,9 @@ fn cap_negotiation_holds_registration_open_until_cap_end() {
 fn unavailable_capabilities_are_refused_not_ignored() {
     let mut server = test_server();
     let id = server.connect(b"example.host".to_vec());
-    let actions = feed(&mut server, id, "CAP REQ :message-tags sasl");
+    let actions = feed(&mut server, id, "CAP REQ :sasl draft/not-implemented");
     // NAK must echo the request verbatim so the client knows what was refused.
-    assert_received(&actions, id, "CAP * NAK :message-tags sasl");
+    assert_received(&actions, id, "CAP * NAK :sasl draft/not-implemented");
 }
 
 #[test]

@@ -98,6 +98,66 @@ impl MessageBuf {
         self
     }
 
+    /// The source, if one is set.
+    #[must_use]
+    pub fn source_bytes(&self) -> Option<&[u8]> {
+        self.source.as_deref()
+    }
+
+    /// The command.
+    #[must_use]
+    pub fn command(&self) -> &[u8] {
+        &self.command
+    }
+
+    /// Whether a tag with this exact key is already attached.
+    #[must_use]
+    pub fn has_tag(&self, key: &[u8]) -> bool {
+        self.tags.iter().any(|(k, _)| k == key)
+    }
+
+    /// Attach a tag only if the key is not already present.
+    ///
+    /// Decoration passes run over messages that may already carry a tag
+    /// the handler set deliberately; this keeps them from being doubled.
+    #[must_use]
+    pub fn tag_if_absent(self, key: impl Into<Vec<u8>>, value: impl AsRef<[u8]>) -> Self {
+        let key = key.into();
+        if self.has_tag(&key) {
+            self
+        } else {
+            self.tag(key, value)
+        }
+    }
+
+    /// Remove every client-only tag.
+    ///
+    /// Client-only tags exist only for clients that negotiated
+    /// `message-tags`; sending them to a client that did not would put
+    /// bytes on the wire it has no way to interpret.
+    #[must_use]
+    pub fn without_client_tags(mut self) -> Self {
+        self.tags.retain(|(key, _)| key.first() != Some(&b'+'));
+        self
+    }
+
+    /// Every client-only tag, as raw key and escaped value.
+    #[must_use]
+    pub fn client_tags(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        self.tags
+            .iter()
+            .filter(|(key, _)| key.first() == Some(&b'+'))
+            .cloned()
+            .collect()
+    }
+
+    /// Attach a tag whose value is already escaped.
+    #[must_use]
+    pub fn raw_tag(mut self, key: impl Into<Vec<u8>>, raw_value: impl Into<Vec<u8>>) -> Self {
+        self.tags.push((key.into(), raw_value.into()));
+        self
+    }
+
     /// Borrow as a [`Message`].
     #[must_use]
     pub fn as_message(&self) -> Message<'_> {

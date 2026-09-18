@@ -15,6 +15,21 @@ pub fn format_utc(unix_seconds: u64) -> String {
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} UTC")
 }
 
+/// Format Unix seconds as an IRCv3 `server-time` timestamp.
+///
+/// The specification wants millisecond precision. The server keeps whole
+/// seconds, so the milliseconds are always zero — which is honest, and what
+/// every consumer of this tag actually reads is the second.
+#[must_use]
+pub fn format_iso8601(unix_seconds: u64) -> String {
+    let secs = i64::try_from(unix_seconds).unwrap_or(i64::MAX);
+    let days = secs.div_euclid(86_400);
+    let time_of_day = secs.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let (hour, minute, second) = (time_of_day / 3600, time_of_day / 60 % 60, time_of_day % 60);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.000Z")
+}
+
 /// Convert days since the Unix epoch to a civil (proleptic Gregorian) date.
 ///
 /// Howard Hinnant's `civil_from_days`, which shifts the year to start in March
@@ -46,7 +61,13 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::format_utc;
+    use super::{format_iso8601, format_utc};
+
+    #[test]
+    fn iso8601_matches_the_server_time_format() {
+        assert_eq!(format_iso8601(0), "1970-01-01T00:00:00.000Z");
+        assert_eq!(format_iso8601(1_758_153_600), "2025-09-18T00:00:00.000Z");
+    }
 
     #[test]
     fn formats_the_epoch() {

@@ -6,6 +6,18 @@ use crate::channel::{Channel, Topic};
 use crate::client::{Client, ClientId};
 use crate::server::{Action, Server};
 
+/// The client-only tags of an incoming message, ready to be relayed.
+///
+/// Values are kept in their escaped wire form: the server does not
+/// interpret them, and re-escaping an unescaped value risks changing it.
+fn client_only_tags(msg: &Message<'_>) -> Vec<(Vec<u8>, Vec<u8>)> {
+    msg.tags()
+        .iter()
+        .filter(|tag| tag.is_client_only())
+        .map(|tag| (tag.key.to_vec(), tag.raw_value.to_vec()))
+        .collect()
+}
+
 /// Split a comma-separated parameter, as `JOIN`, `PART` and `PRIVMSG` use.
 fn split_list(param: &[u8]) -> Vec<&[u8]> {
     param
@@ -35,15 +47,19 @@ impl Server {
     }
 
     pub(crate) fn cmd_away(&mut self, id: ClientId, msg: &Message<'_>, out: &mut Vec<Action>) {
-        if let Some(message) = msg.param(0).filter(|m| !m.is_empty()) {
+        let Some(mask) = self.client(id).map(Client::mask) else {
+            return;
+        };
+        let announcement = if let Some(message) = msg.param(0).filter(|m| !m.is_empty()) {
             let message = self.truncate_reason(message);
-            self.set_away(id, Some(message));
+            self.set_away(id, Some(message.clone()));
             out.push(Action::Send {
                 to: id,
                 message: self
                     .numeric(id, numeric::RPL_NOWAWAY)
                     .trailing("You have been marked as being away"),
             });
+            MessageBuf::new("AWAY").source(mask).trailing(message)
         } else {
             // AWAY with no message, or an empty one, clears away status.
             self.set_away(id, None);
@@ -53,7 +69,11 @@ impl Server {
                     .numeric(id, numeric::RPL_UNAWAY)
                     .trailing("You are no longer marked as being away"),
             });
-        }
+            MessageBuf::new("AWAY").source(mask)
+        };
+        // Only clients that asked are told, so away churn does not become
+        // traffic for everyone else.
+        self.notify_peers_with_cap(out, id, "away-notify", &announcement, false);
     }
 
     pub(crate) fn cmd_join(
@@ -139,9 +159,26 @@ impl Server {
             .channel(name)
             .map_or_else(|| name.to_vec(), |c| c.name().to_vec());
 
-        // Everyone in the channel, including the joiner, sees the JOIN first.
-        let join = MessageBuf::new("JOIN").source(mask).param(display.clone());
-        self.broadcast_channel(out, &folded, &join, None);
+        // Everyone in the channel, including the joiner, sees the JOIN.
+        // Clients with `extended-join` get the account and realname in the
+        // same message, sparing them a WHOIS for every join they witness.
+        let account = self
+            .client(id)
+            .and_then(Client::account)
+            .map_or_else(|| b"*".to_vec(), <[u8]>::to_vec);
+        let realname = self
+            .client(id)
+            .map_or_else(Vec::new, |c| c.realname().to_vec());
+        self.broadcast_channel_with(out, &folded, None, |member| {
+            let base = MessageBuf::new("JOIN")
+                .source(mask.clone())
+                .param(display.clone());
+            Some(if member.has_cap("extended-join") {
+                base.param(account.clone()).trailing(realname.clone())
+            } else {
+                base
+            })
+        });
 
         // Then the joiner alone gets the channel's current state.
         if let Some(topic) = self.channel(name).and_then(Channel::topic) {
@@ -297,11 +334,30 @@ impl Server {
         let Some(mask) = self.client(id).map(Client::mask) else {
             return;
         };
+        let client_tags = client_only_tags(msg);
 
         if self.config().is_valid_channel(target) {
-            self.message_channel(id, target, command, text, &mask, is_notice, out);
+            self.message_channel(
+                id,
+                target,
+                command,
+                text,
+                &mask,
+                is_notice,
+                client_tags,
+                out,
+            );
         } else {
-            self.message_user(id, target, command, text, &mask, is_notice, out);
+            self.message_user(
+                id,
+                target,
+                command,
+                text,
+                &mask,
+                is_notice,
+                client_tags,
+                out,
+            );
         }
     }
 
@@ -314,6 +370,7 @@ impl Server {
         text: &[u8],
         mask: &[u8],
         is_notice: bool,
+        client_tags: Vec<(Vec<u8>, Vec<u8>)>,
         out: &mut Vec<Action>,
     ) {
         let Some(channel) = self.channel(target) else {
@@ -357,13 +414,18 @@ impl Server {
 
         let display = channel.name().to_vec();
         let folded = self.fold(target);
-        let message = MessageBuf::new(command)
+        let mut message = MessageBuf::new(command)
             .source(mask.to_vec())
             .param(display)
             .trailing(text.to_vec());
-        // The sender does not receive an echo of their own message unless they
-        // negotiated echo-message, which nothing does yet.
-        self.broadcast_channel(out, &folded, &message, Some(id));
+        for (key, raw_value) in client_tags {
+            message = message.raw_tag(key, raw_value);
+        }
+        // The sender sees their own message only if they asked to, which is
+        // what lets a client show the server's view rather than its own.
+        let echo = self.client(id).is_some_and(|c| c.has_cap("echo-message"));
+        let except = if echo { None } else { Some(id) };
+        self.broadcast_channel(out, &folded, &message, except);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -375,6 +437,7 @@ impl Server {
         text: &[u8],
         mask: &[u8],
         is_notice: bool,
+        client_tags: Vec<(Vec<u8>, Vec<u8>)>,
         out: &mut Vec<Action>,
     ) {
         let Some(recipient) = self.find_nick(target) else {
@@ -398,13 +461,20 @@ impl Server {
             return;
         };
 
+        let mut message = MessageBuf::new(command)
+            .source(mask.to_vec())
+            .param(nick.clone())
+            .trailing(text.to_vec());
+        for (key, raw_value) in client_tags {
+            message = message.raw_tag(key, raw_value);
+        }
         out.push(Action::Send {
             to: recipient,
-            message: MessageBuf::new(command)
-                .source(mask.to_vec())
-                .param(nick.clone())
-                .trailing(text.to_vec()),
+            message: message.clone(),
         });
+        if self.client(id).is_some_and(|c| c.has_cap("echo-message")) {
+            out.push(Action::Send { to: id, message });
+        }
 
         // Tell the sender if the recipient is away, but never in reply to a
         // NOTICE.
@@ -562,14 +632,16 @@ impl Server {
 
     /// Send the member list for one channel.
     pub(crate) fn send_names(&self, id: ClientId, name: &[u8], out: &mut Vec<Action>) {
+        let multi_prefix = self.client(id).is_some_and(|c| c.has_cap("multi-prefix"));
         if let Some(channel) = self.channel(name) {
             let mut entries: Vec<Vec<u8>> = channel
                 .member_ids()
                 .filter_map(|member| {
                     let nick = self.client(member)?.nick()?;
                     let mut entry = channel.status(member)?.prefixes();
-                    // Only the highest prefix, until multi-prefix is offered.
-                    entry.truncate(1);
+                    if !multi_prefix {
+                        entry.truncate(1);
+                    }
                     entry.extend_from_slice(nick);
                     Some(entry)
                 })

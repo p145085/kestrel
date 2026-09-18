@@ -458,9 +458,10 @@ impl Server {
             to: target,
             message: MessageBuf::new("INVITE")
                 .source(actor_mask)
-                .param(target_display)
+                .param(target_display.clone())
                 .param(display),
         });
+        self.announce_invite(&folded, id, &target_display, out);
     }
 }
 

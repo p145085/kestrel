@@ -6,28 +6,7 @@ use crate::client::ClientId;
 use crate::datetime::format_utc;
 use crate::server::{Action, Server};
 
-/// Capabilities this server offers, as `name` or `name=value`.
-///
-/// The rest of the IRCv3 set, and the call capability, land with the crates
-/// that implement them. Advertising a capability we do not honour is worse
-/// than advertising none: a client that enables it changes its own behaviour
-/// and then waits for messages that never arrive.
-fn supported_caps() -> Vec<String> {
-    vec![format!(
-        "sasl={}",
-        kestreld_services::Mechanism::advertised()
-    )]
-}
-
-/// The bare name of a capability token, dropping any `=value`.
-fn cap_name(token: &str) -> &str {
-    token.split('=').next().unwrap_or(token)
-}
-
-/// Whether `name` is a capability this server offers.
-fn is_supported(name: &str) -> bool {
-    supported_caps().iter().any(|token| cap_name(token) == name)
-}
+use crate::caps::{is_supported, supported as supported_caps};
 
 impl Server {
     pub(crate) fn cmd_cap(

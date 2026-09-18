@@ -51,6 +51,13 @@ pub struct Server {
     created_at: u64,
     max_local_users: usize,
     accounts: AccountStore,
+    /// The most recent timestamp handed to [`Server::handle`].
+    ///
+    /// Teardown paths — a quit, a dropped socket — produce messages too,
+    /// and those need a `server-time` tag like any other. Keeping the last
+    /// known time avoids threading a clock through every signature that
+    /// can indirectly cause a message.
+    last_seen: u64,
 }
 
 impl Server {
@@ -66,6 +73,7 @@ impl Server {
             created_at: now,
             max_local_users: 0,
             accounts: AccountStore::new(),
+            last_seen: now,
         }
     }
 
@@ -279,13 +287,19 @@ impl Server {
 
     /// Handle a client sending `QUIT`, or the server ending the connection.
     pub fn quit(&mut self, id: ClientId, reason: &[u8], out: &mut Vec<Action>) {
+        let start = out.len();
         self.remove_client(id, reason, out);
+        let now = self.last_seen;
+        self.decorate(&mut out[start..], now);
         out.push(Action::Close { client: id });
     }
 
     /// Handle a connection that dropped without a `QUIT`.
     pub fn disconnect(&mut self, id: ClientId, reason: &[u8], out: &mut Vec<Action>) {
+        let start = out.len();
         self.remove_client(id, reason, out);
+        let now = self.last_seen;
+        self.decorate(&mut out[start..], now);
     }
 
     /// Claim `nick` for `id`, updating the lookup table.
@@ -311,6 +325,13 @@ impl Server {
     /// `now` is the current time in Unix seconds, used for topic and channel
     /// creation timestamps.
     pub fn handle(&mut self, id: ClientId, msg: &Message<'_>, now: u64, out: &mut Vec<Action>) {
+        self.last_seen = now;
+        let start = out.len();
+        self.dispatch(id, msg, now, out);
+        self.decorate(&mut out[start..], now);
+    }
+
+    fn dispatch(&mut self, id: ClientId, msg: &Message<'_>, now: u64, out: &mut Vec<Action>) {
         if !self.clients.contains_key(&id) {
             return;
         }
@@ -356,6 +377,8 @@ impl Server {
             b"PART" => self.cmd_part(id, msg, out),
             b"PRIVMSG" => self.cmd_privmsg(id, msg, false, out),
             b"NOTICE" => self.cmd_privmsg(id, msg, true, out),
+            b"TAGMSG" => self.cmd_tagmsg(id, msg, out),
+            b"SETNAME" => self.cmd_setname(id, msg, out),
             b"TOPIC" => self.cmd_topic(id, msg, now, out),
             b"MODE" => self.cmd_mode(id, msg, now, out),
             b"KICK" => self.cmd_kick(id, msg, out),

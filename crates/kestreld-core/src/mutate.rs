@@ -46,6 +46,13 @@ impl Server {
         }
     }
 
+    /// Replace a client's realname.
+    pub(crate) fn set_realname(&mut self, id: ClientId, realname: Vec<u8>) {
+        if let Some(client) = self.clients_mut().get_mut(&id) {
+            client.realname = realname;
+        }
+    }
+
     /// Set or clear a client's away message.
     pub(crate) fn set_away(&mut self, id: ClientId, away: Option<Vec<u8>>) {
         if let Some(client) = self.clients_mut().get_mut(&id) {

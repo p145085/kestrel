@@ -26,6 +26,7 @@
 //! ```
 
 pub mod authenticate;
+pub mod caps;
 pub mod channel;
 pub mod client;
 pub mod commands;
@@ -35,6 +36,7 @@ pub mod mask;
 pub mod moderation;
 pub mod modes;
 mod mutate;
+pub mod notify;
 pub mod queries;
 pub mod register;
 pub mod server;

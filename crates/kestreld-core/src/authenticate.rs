@@ -97,6 +97,9 @@ impl Server {
         }
 
         self.set_account(id, Some(account.clone()));
+        // Anyone who can see this client and asked to be told now learns
+        // which account is behind the nickname.
+        self.announce_account(id, out);
 
         let mask = self.client(id).map(Client::mask).unwrap_or_default();
         out.push(Action::Send {
