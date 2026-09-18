@@ -1,0 +1,8 @@
+# Normalise line endings so the tree is identical on every platform.
+* text=auto eol=lf
+
+# Binary and generated files
+*.png binary
+*.jpg binary
+*.ico binary
+LICENSE text eol=lf

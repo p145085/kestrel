@@ -18,13 +18,18 @@
 //! # Ok::<(), kestrel_proto::ParseError>(())
 //! ```
 
+pub mod casemap;
 pub mod error;
 pub mod limits;
 pub mod message;
+pub mod numeric;
+pub mod owned;
 pub mod source;
 pub mod tags;
 
+pub use casemap::CaseMapping;
 pub use error::{ParseError, SerializeError};
 pub use message::{Message, ParamVec};
+pub use owned::MessageBuf;
 pub use source::Source;
 pub use tags::{Tag, TagVec};

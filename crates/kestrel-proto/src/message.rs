@@ -145,6 +145,16 @@ impl<'a> Message<'a> {
         self.params.get(index).copied()
     }
 
+    /// Whether the final parameter is written in trailing form.
+    ///
+    /// This is presentation, not content: `PRIVMSG #c hi` and
+    /// `PRIVMSG #c :hi` carry the same parameters and compare equal. It is
+    /// exposed so that code copying a message can reproduce the original bytes.
+    #[must_use]
+    pub fn has_trailing_param(&self) -> bool {
+        self.force_trailing
+    }
+
     /// Parse one line into a message.
     ///
     /// Trailing CR and LF bytes are stripped, so a line may be passed either
