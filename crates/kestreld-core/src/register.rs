@@ -6,7 +6,7 @@ use crate::client::ClientId;
 use crate::datetime::format_utc;
 use crate::server::{Action, Server};
 
-use crate::caps::{is_supported, supported as supported_caps};
+use crate::caps::{name_of, supported_for};
 
 impl Server {
     pub(crate) fn cmd_cap(
@@ -44,7 +44,7 @@ impl Server {
                         .source(self.server_name())
                         .param(target)
                         .param("LS")
-                        .trailing(supported_caps().join(" ")),
+                        .trailing(supported_for(self.config()).join(" ")),
                 });
             }
             b"LIST" => {
@@ -100,10 +100,12 @@ impl Server {
         let text = String::from_utf8_lossy(requested).into_owned();
         let tokens: Vec<&str> = text.split_whitespace().collect();
 
+        let offered = supported_for(self.config());
         let all_known = !tokens.is_empty()
-            && tokens
-                .iter()
-                .all(|token| is_supported(token.trim_start_matches('-')));
+            && tokens.iter().all(|token| {
+                let wanted = token.trim_start_matches('-');
+                offered.iter().any(|o| name_of(o) == wanted)
+            });
 
         let verb = if all_known { "ACK" } else { "NAK" };
         if all_known {

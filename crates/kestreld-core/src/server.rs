@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use kestrel_proto::{Message, MessageBuf, numeric};
 use kestreld_services::AccountStore;
 
+use crate::calls::CallRegistry;
 use crate::channel::Channel;
 use crate::client::{Client, ClientId, RegistrationState};
 use crate::config::ServerConfig;
@@ -53,6 +54,7 @@ pub struct Server {
     accounts: AccountStore,
     /// Set when the account store changed and has not yet been saved.
     accounts_changed: bool,
+    calls: CallRegistry,
     /// The most recent timestamp handed to [`Server::handle`].
     ///
     /// Teardown paths — a quit, a dropped socket — produce messages too,
@@ -76,8 +78,19 @@ impl Server {
             max_local_users: 0,
             accounts: AccountStore::new(),
             accounts_changed: false,
+            calls: CallRegistry::new(),
             last_seen: now,
         }
+    }
+
+    /// Calls in progress.
+    #[must_use]
+    pub fn calls(&self) -> &CallRegistry {
+        &self.calls
+    }
+
+    pub(crate) fn calls_mut(&mut self) -> &mut CallRegistry {
+        &mut self.calls
     }
 
     /// The account store.
@@ -281,6 +294,12 @@ impl Server {
         let folded_channels: Vec<Vec<u8>> = client.channels.iter().cloned().collect();
         let folded_nick = client.nick.as_deref().map(|n| self.fold(n));
 
+        // Leaving the server means leaving every call: a participant nobody
+        // can reach any more would otherwise sit in the roster forever.
+        for call_id in self.calls.remove_client(id) {
+            self.calls.drop_if_empty(call_id);
+        }
+
         for folded in folded_channels {
             if let Some(channel) = self.channels.get_mut(&folded) {
                 channel.remove_member(id);
@@ -401,6 +420,7 @@ impl Server {
             b"MODE" => self.cmd_mode(id, msg, now, out),
             b"KICK" => self.cmd_kick(id, msg, out),
             b"INVITE" => self.cmd_invite(id, msg, out),
+            b"CALL" => self.cmd_call(id, msg, now, out),
             b"NAMES" => self.cmd_names(id, msg, out),
             b"MOTD" => self.send_motd(id, out),
             b"LUSERS" => self.send_lusers(id, out),

@@ -39,6 +39,11 @@ registration_timeout_secs = 60
 # A password every client must supply with PASS, if you want one.
 # password = "..."
 
+# Carry call signalling. See spec/rtc-over-irc.md.
+# The server routes signalling only: it never sees media, and the payloads it
+# relays are sealed to a specific recipient, so it cannot read those either.
+# calls_enabled = true
+
 # Where registered accounts are saved. Without this, accounts created with
 # REGISTER exist only in memory and vanish when the server stops.
 accounts_file = "data/accounts.json"

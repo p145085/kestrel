@@ -42,6 +42,11 @@ pub struct Config {
     pub idle_timeout_secs: u64,
     /// Seconds a connection may take to finish registering.
     pub registration_timeout_secs: u64,
+    /// Whether to carry call signalling.
+    ///
+    /// Off by default: a network should decide to route calls rather than
+    /// discover it is doing so.
+    pub calls_enabled: bool,
     /// Where registered accounts are saved. Unset means they are not
     /// persisted and vanish when the server stops.
     pub accounts_file: Option<PathBuf>,
@@ -80,6 +85,7 @@ impl Default for Config {
             max_channels_per_client: 128,
             idle_timeout_secs: 300,
             registration_timeout_secs: 60,
+            calls_enabled: false,
             accounts_file: None,
             accounts: Vec::new(),
         }
@@ -107,6 +113,7 @@ impl Config {
             max_channel_len: self.max_channel_len,
             max_channels_per_client: self.max_channels_per_client,
             password: self.password.clone().map(String::into_bytes),
+            calls_enabled: self.calls_enabled,
             ..ServerConfig::default()
         }
     }
@@ -168,6 +175,13 @@ mod tests {
     fn casemapping_is_translated_for_the_state_machine() {
         let parsed: Config = toml::from_str(r#"casemapping = "ascii""#).unwrap();
         assert_eq!(parsed.to_server_config().casemapping, CaseMapping::Ascii);
+    }
+
+    #[test]
+    fn calls_are_off_unless_asked_for() {
+        assert!(!Config::default().to_server_config().calls_enabled);
+        let parsed: Config = toml::from_str("calls_enabled = true").unwrap();
+        assert!(parsed.to_server_config().calls_enabled);
     }
 
     #[test]

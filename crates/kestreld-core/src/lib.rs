@@ -27,6 +27,7 @@
 
 pub mod accounts;
 pub mod authenticate;
+pub mod calls;
 pub mod caps;
 pub mod channel;
 pub mod client;
@@ -40,8 +41,10 @@ mod mutate;
 pub mod notify;
 pub mod queries;
 pub mod register;
+pub mod rtc;
 pub mod server;
 
+pub use calls::{Call, CallId, CallRegistry, Media};
 pub use channel::{BanEntry, Channel, ChannelModes, MemberStatus, Topic};
 pub use client::{Client, ClientId, RegistrationState};
 pub use config::ServerConfig;

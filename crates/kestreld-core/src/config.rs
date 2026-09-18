@@ -30,6 +30,11 @@ pub struct ServerConfig {
     pub channel_prefixes: Vec<u8>,
     /// A password every client must supply via `PASS`, if any.
     pub password: Option<Vec<u8>>,
+    /// Whether to offer calls.
+    ///
+    /// Off by default: a network should decide to carry call signalling
+    /// rather than discover it is doing so.
+    pub calls_enabled: bool,
 }
 
 impl Default for ServerConfig {
@@ -47,6 +52,7 @@ impl Default for ServerConfig {
             max_channels_per_client: 128,
             channel_prefixes: b"#&".to_vec(),
             password: None,
+            calls_enabled: false,
         }
     }
 }

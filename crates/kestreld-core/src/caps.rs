@@ -10,6 +10,7 @@
 use kestrel_proto::MessageBuf;
 
 use crate::client::{Client, ClientId};
+use crate::config::ServerConfig;
 use crate::datetime::format_iso8601;
 use crate::server::{Action, Server};
 
@@ -18,6 +19,16 @@ use crate::server::{Action, Server};
 /// Advertising one we do not honour is worse than advertising none: a client
 /// that enables it changes its own behaviour and then waits for messages that
 /// never arrive.
+#[must_use]
+pub fn supported_for(config: &ServerConfig) -> Vec<String> {
+    let mut caps = supported();
+    if config.calls_enabled {
+        caps.push(crate::rtc::capability_token());
+    }
+    caps
+}
+
+/// The capabilities offered regardless of configuration.
 #[must_use]
 pub fn supported() -> Vec<String> {
     vec![
