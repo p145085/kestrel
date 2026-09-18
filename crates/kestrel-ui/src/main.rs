@@ -57,11 +57,23 @@ fn main() -> Result<()> {
     // indistinguishable from somebody closing it.
     kestrel_client::crash::write_panics_to_a_file();
 
-    // Warnings and worse only: this is a chat window, and its console is for
-    // things that went wrong rather than a running commentary.
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::WARN)
-        .init();
+    // To a file as well as the console. A crash that is not a Rust panic
+    // leaves no report, and what the pipeline was doing just before is then
+    // the only evidence there is. Set KESTREL_LOG=debug for more of it.
+    let level = match std::env::var("KESTREL_LOG").as_deref() {
+        Ok("debug") => tracing::Level::DEBUG,
+        Ok("info") => tracing::Level::INFO,
+        Ok("trace") => tracing::Level::TRACE,
+        _ => tracing::Level::WARN,
+    };
+    match kestrel_client::crash::log_file().and_then(open_log) {
+        Some(file) => tracing_subscriber::fmt()
+            .with_max_level(level)
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file))
+            .init(),
+        None => tracing_subscriber::fmt().with_max_level(level).init(),
+    }
 
     let Some(options) = parse_args()? else {
         return Ok(());
@@ -108,6 +120,18 @@ fn main() -> Result<()> {
     // exit complaining about the ones it does not recognise.
     app.run_with_args::<&str>(&[]);
     Ok(())
+}
+
+/// Open the log for appending, making its directory if need be.
+fn open_log(path: std::path::PathBuf) -> Option<std::fs::File> {
+    if let Some(directory) = path.parent() {
+        let _ = std::fs::create_dir_all(directory);
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .ok()
 }
 
 fn parse_args() -> Result<Option<Options>> {

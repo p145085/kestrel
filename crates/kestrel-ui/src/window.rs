@@ -14,6 +14,7 @@ use kestrel_media::gstreamer::prelude::{ElementExt, PadExtManual};
 use kestrel_net::ConnectConfig;
 use kestrel_session::SessionConfig;
 use kestrel_ui::connection::CallOptions;
+use kestrel_ui::devices;
 use kestrel_ui::event::{AppEvent, BufferId, CallAction, Line, LineKind, SERVER_BUFFER, UiCommand};
 use tokio::sync::mpsc;
 
@@ -1104,8 +1105,8 @@ impl Window {
         let cameras = kestrel_media::cameras();
         let microphones = kestrel_media::microphones();
 
-        let camera = device_chooser(&cameras);
-        let microphone = device_chooser(&microphones);
+        let camera = devices::chooser(&cameras);
+        let microphone = devices::chooser(&microphones);
         let test = gtk::CheckButton::with_label("Use a test picture and tone instead");
 
         let grid = gtk::Grid::builder()
@@ -1179,8 +1180,8 @@ impl Window {
             let (camera, microphone, test) = &chosen;
             let _ = ui.commands.borrow().send(UiCommand::Devices {
                 target: target.clone(),
-                camera: chosen_device(camera),
-                microphone: chosen_device(microphone),
+                camera: devices::chosen(camera),
+                microphone: devices::chosen(microphone),
                 test: test.is_active(),
             });
             closing.close();
@@ -1383,28 +1384,6 @@ fn member_menu(nick: &str) -> gio::Menu {
         Some(&format!("win.whois-nick::{nick}")),
     );
     menu
-}
-
-/// A dropdown over a list of device names, with the default first.
-fn device_chooser(names: &[String]) -> gtk::DropDown {
-    let mut entries: Vec<&str> = vec!["(system default)"];
-    entries.extend(names.iter().map(String::as_str));
-    let chooser = gtk::DropDown::from_strings(&entries);
-    chooser.set_hexpand(true);
-    chooser
-}
-
-/// What a chooser is pointing at, or `None` for the default.
-fn chosen_device(chooser: &gtk::DropDown) -> Option<String> {
-    let selected = chooser.selected();
-    if selected == 0 {
-        return None;
-    }
-    chooser
-        .model()
-        .and_downcast::<gtk::StringList>()
-        .and_then(|list| list.string(selected))
-        .map(|name| name.to_string())
 }
 
 /// The menu bar's contents.

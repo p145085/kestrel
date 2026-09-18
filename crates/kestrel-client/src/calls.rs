@@ -350,7 +350,7 @@ impl Calls {
         self.per_target.insert(conversation_key(target), source);
         self.notices.push(Notice::in_target(
             Level::Info,
-            format!("calls here will use {description}"),
+            format!("calls in {target} will use {description}"),
             target,
         ));
     }
@@ -915,11 +915,25 @@ impl Calls {
                 // exactly what somebody wondering why their choice did nothing
                 // needs to see.
                 let devices = connection.devices().clone();
+                // Naming the conversation as well as the device, because the
+                // two only differ when a choice was filed under one name and
+                // looked up under another -- which is otherwise invisible.
+                let chosen = self
+                    .active
+                    .get(call_id)
+                    .map(|entry| entry.target.clone())
+                    .unwrap_or_default();
                 if let Some(camera) = devices.camera {
-                    self.say_in(call_id, format!("sending video from {camera}"));
+                    self.say_in(
+                        call_id,
+                        format!("sending video from {camera} (in {chosen})"),
+                    );
                 }
                 if let Some(microphone) = devices.microphone {
-                    self.say_in(call_id, format!("sending audio from {microphone}"));
+                    self.say_in(
+                        call_id,
+                        format!("sending audio from {microphone} (in {chosen})"),
+                    );
                 }
                 if matches!(source, Source::Test) {
                     self.say_in(call_id, "sending a test picture and tone");

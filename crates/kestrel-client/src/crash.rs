@@ -44,6 +44,17 @@ pub fn write_panics_to_a_file() {
     }));
 }
 
+/// Where the running log is written.
+///
+/// A crash that is not a Rust panic -- an access violation inside GStreamer,
+/// say -- leaves no report at all, and the process simply ends. What was
+/// happening just before is then the only evidence there is.
+#[must_use]
+pub fn log_file() -> Option<PathBuf> {
+    crate::store::Store::in_config_directory()
+        .and_then(|store| store.path().parent().map(|d| d.join("kestrel.log")))
+}
+
 /// Where a crash report is written.
 #[must_use]
 pub fn crash_log() -> Option<PathBuf> {

@@ -6,5 +6,6 @@
 
 pub mod command;
 pub mod connection;
+pub mod devices;
 pub mod event;
 pub mod translate;
