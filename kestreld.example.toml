@@ -1,9 +1,18 @@
 # Example kestreld configuration.
 # Copy to kestreld.toml and edit. `kestreld --print-config` prints the defaults.
 
-# Addresses to accept connections on.
-# Connections are plaintext for now, so bind to localhost until TLS lands.
+# Addresses to accept plaintext connections on.
 listen = ["127.0.0.1:6667"]
+
+# Addresses to accept TLS connections on, with the certificate and key to use.
+# Prefer this: SASL PLAIN sends a password, and SASL EXTERNAL needs a client
+# certificate, so neither is safe on the plaintext port.
+#
+# For a self-signed certificate to test with:
+#   openssl req -x509 -newkey rsa:4096 -days 365 -nodes #       -keyout key.pem -out cert.pem -subj "/CN=localhost"
+# tls_listen = ["0.0.0.0:6697"]
+# tls_certificate = "cert.pem"
+# tls_key = "key.pem"
 
 server_name = "kestrel.local"
 network_name = "Kestrel"

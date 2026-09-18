@@ -1,7 +1,7 @@
 //! Configuration file handling.
 
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use kestrel_proto::CaseMapping;
@@ -14,6 +14,14 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     /// Addresses to accept plaintext connections on.
     pub listen: Vec<SocketAddr>,
+    /// Addresses to accept TLS connections on.
+    ///
+    /// Requires `tls_certificate` and `tls_key`.
+    pub tls_listen: Vec<SocketAddr>,
+    /// PEM file holding the server's certificate chain.
+    pub tls_certificate: Option<PathBuf>,
+    /// PEM file holding the server's private key.
+    pub tls_key: Option<PathBuf>,
     /// The server's own name.
     pub server_name: String,
     /// Network name, advertised as the `NETWORK` token.
@@ -56,6 +64,9 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             listen: vec!["127.0.0.1:6667".parse().expect("valid default address")],
+            tls_listen: Vec::new(),
+            tls_certificate: None,
+            tls_key: None,
             server_name: "kestrel.local".to_owned(),
             network_name: "Kestrel".to_owned(),
             motd: Vec::new(),
@@ -93,6 +104,23 @@ impl Config {
             max_channels_per_client: self.max_channels_per_client,
             password: self.password.clone().map(String::into_bytes),
             ..ServerConfig::default()
+        }
+    }
+
+    /// The TLS certificate and key, if TLS is configured.
+    ///
+    /// Returns an error rather than silently falling back to plaintext: an
+    /// operator who asked for TLS and got a cleartext port instead would have
+    /// no way of noticing until it mattered.
+    pub fn tls_paths(&self) -> Result<Option<(&Path, &Path)>> {
+        if self.tls_listen.is_empty() {
+            return Ok(None);
+        }
+        match (&self.tls_certificate, &self.tls_key) {
+            (Some(certificate), Some(key)) => Ok(Some((certificate.as_path(), key.as_path()))),
+            _ => anyhow::bail!(
+                "tls_listen is set but tls_certificate and tls_key are not both configured"
+            ),
         }
     }
 
@@ -136,6 +164,19 @@ mod tests {
     fn casemapping_is_translated_for_the_state_machine() {
         let parsed: Config = toml::from_str(r#"casemapping = "ascii""#).unwrap();
         assert_eq!(parsed.to_server_config().casemapping, CaseMapping::Ascii);
+    }
+
+    #[test]
+    fn tls_without_a_certificate_is_an_error() {
+        // Falling back to plaintext here would hand an operator a cleartext
+        // port they believed was encrypted.
+        let parsed: Config = toml::from_str(r#"tls_listen = ["127.0.0.1:6697"]"#).unwrap();
+        assert!(parsed.tls_paths().is_err());
+    }
+
+    #[test]
+    fn tls_is_off_unless_a_listener_is_configured() {
+        assert!(Config::default().tls_paths().unwrap().is_none());
     }
 
     #[test]

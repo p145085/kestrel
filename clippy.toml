@@ -10,6 +10,7 @@ doc-valid-idents = [
     "LiveKit",
     "OpenSSL",
     "SQLite",
+    "CertFP",
     "ChaCha20",
     "Poly1305",
     "X25519",

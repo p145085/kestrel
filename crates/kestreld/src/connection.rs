@@ -1,12 +1,15 @@
 //! Per-connection I/O: framing lines and pumping them to and from the core.
+//!
+//! Generic over the stream so that plaintext and TLS connections travel the
+//! same path. Framing bugs are the kind that only show up under one transport,
+//! and having two copies of this loop is how that happens.
 
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadHalf};
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, warn};
+use tracing::warn;
 
 use kestreld_core::ClientId;
 
@@ -21,8 +24,8 @@ pub const MAX_LINE: usize = kestrel_proto::limits::MAX_TAGS_TOTAL + kestrel_prot
 /// How many lines may be queued for a slow client before it is disconnected.
 ///
 /// Without a bound, one client that stops reading makes the server buffer
-/// everything the channels it is in produce — which is a denial of service
-/// anyone can trigger by connecting and going quiet.
+/// everything the channels it is in produce — a denial of service anyone can
+/// trigger by connecting and going quiet.
 pub const MAX_SEND_QUEUE: usize = 1024;
 
 /// What a connection reports to the core.
@@ -32,6 +35,8 @@ pub enum Event {
     Connected {
         /// Hostname to show in the client's mask.
         host: Vec<u8>,
+        /// SHA-256 fingerprint of the client's TLS certificate, if it gave one.
+        certificate_fingerprint: Option<String>,
         /// Where to deliver this client's outbound lines.
         outbound: mpsc::Sender<Vec<u8>>,
         /// Where to send the assigned id.
@@ -44,24 +49,22 @@ pub enum Event {
 }
 
 /// Serve one accepted connection until it ends.
-pub async fn serve(
-    stream: TcpStream,
+pub async fn serve<S>(
+    stream: S,
     peer: SocketAddr,
+    certificate_fingerprint: Option<String>,
     events: mpsc::Sender<Event>,
     idle_timeout: Duration,
-) {
-    // Disable Nagle: IRC is a chat protocol made of small writes, and batching
-    // them adds latency for no benefit.
-    if let Err(error) = stream.set_nodelay(true) {
-        debug!(%peer, %error, "could not disable Nagle");
-    }
-
+) where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<Vec<u8>>(MAX_SEND_QUEUE);
     let (id_tx, id_rx) = oneshot::channel();
 
     if events
         .send(Event::Connected {
             host: peer.ip().to_string().into_bytes(),
+            certificate_fingerprint,
             outbound: outbound_tx,
             reply: id_tx,
         })
@@ -74,11 +77,11 @@ pub async fn serve(
         return;
     };
 
-    let (read_half, mut write_half) = stream.into_split();
+    let (read_half, mut write_half) = tokio::io::split(stream);
     let mut reader = BufReader::new(read_half);
 
-    // Writing runs in its own task so that a slow reader cannot stall the
-    // read side, and vice versa.
+    // Writing runs in its own task so that a slow reader cannot stall the read
+    // side, and vice versa.
     let writer = tokio::spawn(async move {
         while let Some(line) = outbound_rx.recv().await {
             if write_half.write_all(&line).await.is_err() {
@@ -94,12 +97,15 @@ pub async fn serve(
     let _ = events.send(Event::Disconnected(id, reason)).await;
 }
 
-async fn read_loop(
-    reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+async fn read_loop<S>(
+    reader: &mut BufReader<ReadHalf<S>>,
     id: ClientId,
     events: &mpsc::Sender<Event>,
     idle_timeout: Duration,
-) -> String {
+) -> String
+where
+    S: AsyncRead + AsyncWrite,
+{
     let mut line = Vec::with_capacity(512);
 
     loop {

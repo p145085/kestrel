@@ -30,6 +30,14 @@ toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 anyhow = "1"
+# The ring provider rather than the aws-lc default: aws-lc-sys needs a C
+# toolchain and NASM on Windows, which would make the build fragile on one
+# of the three platforms this has to work on.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pemfile = "2"
+sha2 = "0.10"
+rcgen = "0.13"
 memchr = "2.7"
 thiserror = "2"
 smallvec = { version = "1.13", features = ["union", "const_generics"] }

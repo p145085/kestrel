@@ -8,6 +8,7 @@
 
 pub mod config;
 pub mod connection;
+pub mod tls;
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -17,8 +18,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use kestrel_proto::Message;
 use kestreld_core::{Action, ClientId, Server};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
+use tokio_rustls::TlsAcceptor;
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
@@ -33,6 +35,18 @@ pub fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+/// Bind every TLS address the configuration asks for.
+pub async fn bind_tls(config: &Config) -> Result<Vec<TcpListener>> {
+    let mut listeners = Vec::with_capacity(config.tls_listen.len());
+    for address in &config.tls_listen {
+        let listener = TcpListener::bind(address)
+            .await
+            .with_context(|| format!("binding {address}"))?;
+        listeners.push(listener);
+    }
+    Ok(listeners)
 }
 
 /// Bind every address the configuration asks for.
@@ -69,31 +83,96 @@ fn build_server(config: &Config) -> Server {
 
 /// Run the server, binding from configuration and stopping on Ctrl-C.
 pub async fn run(config: Config) -> Result<()> {
+    let acceptor = match config.tls_paths()? {
+        Some((certificate, key)) => Some(tls::acceptor(certificate, key)?),
+        None => None,
+    };
+
     let listeners = bind(&config).await?;
+    let tls_listeners = bind_tls(&config).await?;
     for listener in &listeners {
         if let Ok(address) = listener.local_addr() {
             info!(%address, "listening");
         }
     }
-    serve(config, listeners, async {
+    for listener in &tls_listeners {
+        if let Ok(address) = listener.local_addr() {
+            info!(%address, "listening (TLS)");
+        }
+    }
+    if listeners.is_empty() && tls_listeners.is_empty() {
+        anyhow::bail!("no listen or tls_listen addresses are configured");
+    }
+
+    serve_all(config, listeners, tls_listeners, acceptor, async {
         let _ = tokio::signal::ctrl_c().await;
     })
     .await
 }
 
-/// Serve on already-bound listeners until `shutdown` completes.
+/// Serve on already-bound plaintext listeners until `shutdown` completes.
 pub async fn serve<S>(config: Config, listeners: Vec<TcpListener>, shutdown: S) -> Result<()>
 where
     S: Future<Output = ()> + Send,
 {
+    serve_all(config, listeners, Vec::new(), None, shutdown).await
+}
+
+/// Serve on plaintext and TLS listeners until `shutdown` completes.
+pub async fn serve_all<S>(
+    config: Config,
+    listeners: Vec<TcpListener>,
+    tls_listeners: Vec<TcpListener>,
+    acceptor: Option<TlsAcceptor>,
+    shutdown: S,
+) -> Result<()>
+where
+    S: Future<Output = ()> + Send,
+{
+    serve_all_with(config, listeners, tls_listeners, acceptor, |_| {}, shutdown).await
+}
+
+/// As [`serve_all`], but running `prepare` against the freshly built server.
+///
+/// The server owns its own state, so anything that has to be seeded before the
+/// first connection — certificate fingerprints, channels restored from disk —
+/// needs a hook here rather than a handle handed out afterwards.
+pub async fn serve_all_with<P, S>(
+    config: Config,
+    listeners: Vec<TcpListener>,
+    tls_listeners: Vec<TcpListener>,
+    acceptor: Option<TlsAcceptor>,
+    prepare: P,
+    shutdown: S,
+) -> Result<()>
+where
+    P: FnOnce(&mut Server),
+    S: Future<Output = ()> + Send,
+{
     let mut server = build_server(&config);
+    prepare(&mut server);
     let (events_tx, mut events_rx) = mpsc::channel::<Event>(EVENT_QUEUE);
     let idle_timeout = Duration::from_secs(config.idle_timeout_secs);
 
-    let mut accept_tasks = Vec::with_capacity(listeners.len());
+    let mut accept_tasks = Vec::with_capacity(listeners.len() + tls_listeners.len());
     for listener in listeners {
         let events = events_tx.clone();
         accept_tasks.push(tokio::spawn(accept_loop(listener, events, idle_timeout)));
+    }
+    if !tls_listeners.is_empty() && acceptor.is_none() {
+        anyhow::bail!("TLS listeners were supplied without a TLS acceptor");
+    }
+    for listener in tls_listeners {
+        let events = events_tx.clone();
+        let Some(acceptor) = acceptor.clone() else {
+            continue;
+        };
+        accept_tasks.push(tokio::spawn(tls_accept_loop(
+            listener,
+            acceptor,
+            events,
+            idle_timeout,
+        )));
     }
     drop(events_tx);
 
@@ -125,8 +204,9 @@ async fn accept_loop(listener: TcpListener, events: mpsc::Sender<Event>, idle_ti
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
+                set_nodelay(&stream, peer);
                 let events = events.clone();
-                tokio::spawn(connection::serve(stream, peer, events, idle_timeout));
+                tokio::spawn(connection::serve(stream, peer, None, events, idle_timeout));
             }
             Err(error) => {
                 error!(%error, "accept failed");
@@ -139,6 +219,51 @@ async fn accept_loop(listener: TcpListener, events: mpsc::Sender<Event>, idle_ti
     }
 }
 
+/// Accept TLS connections, completing each handshake off the accept path.
+async fn tls_accept_loop(
+    listener: TcpListener,
+    acceptor: TlsAcceptor,
+    events: mpsc::Sender<Event>,
+    idle_timeout: Duration,
+) {
+    loop {
+        match listener.accept().await {
+            Ok((stream, peer)) => {
+                set_nodelay(&stream, peer);
+                let acceptor = acceptor.clone();
+                let events = events.clone();
+                // The handshake runs in the connection's own task: a client
+                // that stalls mid-handshake must not hold up every other
+                // connection waiting to be accepted.
+                tokio::spawn(async move {
+                    let Ok(stream) = acceptor.accept(stream).await else {
+                        debug!(%peer, "TLS handshake failed");
+                        return;
+                    };
+                    let fingerprint = stream
+                        .get_ref()
+                        .1
+                        .peer_certificates()
+                        .and_then(<[_]>::first)
+                        .map(tls::fingerprint);
+                    connection::serve(stream, peer, fingerprint, events, idle_timeout).await;
+                });
+            }
+            Err(error) => {
+                error!(%error, "accept failed");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
+}
+
+/// IRC is made of small writes, so batching them adds latency for no benefit.
+fn set_nodelay(stream: &TcpStream, peer: SocketAddr) {
+    if let Err(error) = stream.set_nodelay(true) {
+        debug!(%peer, %error, "could not disable Nagle");
+    }
+}
+
 fn handle_event(
     server: &mut Server,
     outbound: &mut HashMap<ClientId, mpsc::Sender<Vec<u8>>>,
@@ -148,11 +273,18 @@ fn handle_event(
     match event {
         Event::Connected {
             host,
+            certificate_fingerprint,
             outbound: sender,
             reply,
         } => {
             let id = server.connect(host);
             outbound.insert(id, sender);
+            // The fingerprint comes from the TLS layer, never from the client,
+            // which is the whole basis of authenticating by certificate.
+            if let Some(fingerprint) = certificate_fingerprint {
+                debug!(%id, %fingerprint, "client presented a certificate");
+                server.set_certificate_fingerprint(id, fingerprint);
+            }
             debug!(%id, "connected");
             if reply.send(id).is_err() {
                 // The connection went away between accept and assignment.
