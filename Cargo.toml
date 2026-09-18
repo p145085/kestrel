@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/kestrel-call",
+    "crates/kestrel-client",
     "crates/kestrel-crypto",
     "crates/kestrel-media",
     "crates/kestrel-proto",
@@ -26,6 +27,7 @@ authors = ["Kestrel contributors"]
 
 [workspace.dependencies]
 kestrel-call = { path = "crates/kestrel-call" }
+kestrel-client = { path = "crates/kestrel-client" }
 kestrel-crypto = { path = "crates/kestrel-crypto" }
 kestrel-proto = { path = "crates/kestrel-proto" }
 kestrel-rtc-proto = { path = "crates/kestrel-rtc-proto" }

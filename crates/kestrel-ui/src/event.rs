@@ -30,6 +30,8 @@ pub enum LineKind {
     Error,
     /// What we sent ourselves.
     Own,
+    /// Something that must actually be read, not merely displayed.
+    Highlight,
 }
 
 /// One line in a buffer.
@@ -158,11 +160,36 @@ pub enum AppEvent {
         /// The software it runs.
         version: String,
     },
+    /// What the call machinery can currently be asked to do.
+    ///
+    /// Sent whenever it changes, so the menu offers answering only when
+    /// somebody is actually ringing and hanging up only when there is a call.
+    CallState {
+        /// Somebody is ringing.
+        ringing: bool,
+        /// A call is in progress.
+        active: bool,
+    },
     /// The connection ended.
     Disconnected {
         /// Why.
         reason: String,
     },
+}
+
+/// Something to do with a call.
+#[derive(Debug, Clone)]
+pub enum CallAction {
+    /// Call a nickname or a channel.
+    Start(String),
+    /// Accept whoever is ringing.
+    Answer,
+    /// Decline whoever is ringing.
+    Reject,
+    /// Leave the call.
+    HangUp,
+    /// Confirm the spoken phrase matched.
+    Verify,
 }
 
 /// Something the interface wants done.
@@ -178,6 +205,8 @@ pub enum UiCommand {
         /// What was typed.
         text: String,
     },
+    /// Do something with a call.
+    Call(CallAction),
     /// Leave, and close the connection.
     Quit {
         /// The parting message.

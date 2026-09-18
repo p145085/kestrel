@@ -1,8 +1,12 @@
-//! Placing and answering calls from the terminal client.
+//! Placing and answering calls.
 //!
 //! Joins the three pieces that were built separately: `CALL` messages over
 //! IRC, the call state machine that decides what they mean, and the media
 //! engine that actually carries audio and video.
+//!
+//! Says nothing itself. Everything it wants shown is queued as a [`Notice`]
+//! and collected by whoever is driving, so the terminal client and the window
+//! run the same code and differ only in how they draw the result.
 
 use std::collections::{HashMap, HashSet};
 
@@ -15,9 +19,10 @@ use kestrel_proto::MessageBuf;
 use kestrel_rtc_proto::MediaWanted;
 use tokio::sync::mpsc;
 
-use crate::ui::{colour, status, warn};
+use crate::notice::{Level, Notice};
 
 /// A media event tagged with the peer it came from.
+#[derive(Debug)]
 pub struct TaggedMediaEvent {
     /// The peer.
     pub peer: String,
@@ -58,6 +63,8 @@ pub struct Calls {
     media: MediaWanted,
     /// Where media events are funnelled.
     media_tx: mpsc::UnboundedSender<TaggedMediaEvent>,
+    /// What the client should show, waiting to be collected.
+    notices: Vec<Notice>,
 }
 
 struct ActiveCall {
@@ -81,6 +88,20 @@ struct ActiveCall {
     invited: Vec<String>,
 }
 
+impl std::fmt::Debug for Calls {
+    /// Deliberately partial: no identity key, no known-peer table, no session
+    /// keys. A debug line is not a place for any of that to turn up.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Calls")
+            .field("nick", &self.nick)
+            .field("account", &self.account)
+            .field("privacy", &self.privacy)
+            .field("calls", &self.active.len())
+            .field("connections", &self.connections.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl Calls {
     /// Start with a fresh identity.
     ///
@@ -102,7 +123,83 @@ impl Calls {
             offer_wanted: HashSet::new(),
             negotiation_ready: HashSet::new(),
             media_tx,
+            notices: Vec::new(),
         }
+    }
+
+    /// Take everything waiting to be shown.
+    ///
+    /// Drained rather than read, because every notice should be shown once and
+    /// a client that forgets to collect them should accumulate a backlog it
+    /// notices, not silently drop them.
+    pub fn take_notices(&mut self) -> Vec<Notice> {
+        std::mem::take(&mut self.notices)
+    }
+
+    fn say(&mut self, text: impl Into<String>) {
+        self.notices.push(Notice::new(Level::Info, text));
+    }
+
+    fn warn(&mut self, text: impl Into<String>) {
+        self.notices.push(Notice::new(Level::Warning, text));
+    }
+
+    /// The same, but attached to the conversation a call belongs to.
+    fn say_in(&mut self, call_id: &str, text: impl Into<String>) {
+        self.notice_in(call_id, Level::Info, text);
+    }
+
+    fn warn_in(&mut self, call_id: &str, text: impl Into<String>) {
+        self.notice_in(call_id, Level::Warning, text);
+    }
+
+    fn highlight_in(&mut self, call_id: &str, text: impl Into<String>) {
+        self.notice_in(call_id, Level::Highlight, text);
+    }
+
+    fn notice_in(&mut self, call_id: &str, level: Level, text: impl Into<String>) {
+        let notice = match self.active.get(call_id) {
+            Some(entry) => Notice::in_target(level, text, entry.target.clone()),
+            // The call is not one we are tracking, so there is nowhere in
+            // particular for this to go.
+            None => Notice::new(level, text),
+        };
+        self.notices.push(notice);
+    }
+
+    /// The same again, for what a media event says about one peer.
+    fn say_about(&mut self, peer: &str, text: impl Into<String>) {
+        self.notice_about(peer, Level::Info, text);
+    }
+
+    fn warn_about(&mut self, peer: &str, text: impl Into<String>) {
+        self.notice_about(peer, Level::Warning, text);
+    }
+
+    fn notice_about(&mut self, peer: &str, level: Level, text: impl Into<String>) {
+        let notice = match self.target_of_peer(peer) {
+            Some(target) => Notice::in_target(level, text, target),
+            None => Notice::new(level, text),
+        };
+        self.notices.push(notice);
+    }
+
+    /// The conversation a peer's call belongs to, if we know of one.
+    fn target_of_peer(&self, peer: &str) -> Option<String> {
+        let call_id = self.call_of(peer)?;
+        self.active.get(&call_id).map(|entry| entry.target.clone())
+    }
+
+    /// Whether somebody is ringing and has not been answered.
+    #[must_use]
+    pub fn is_ringing(&self) -> bool {
+        self.active.values().any(|entry| !entry.ringing.is_empty())
+    }
+
+    /// Whether any call is in progress.
+    #[must_use]
+    pub fn in_call(&self) -> bool {
+        !self.active.is_empty()
     }
 
     /// Record the account we authenticated as.
@@ -113,7 +210,7 @@ impl Calls {
     /// Use generated test patterns instead of real capture devices.
     pub fn use_test_media(&mut self) {
         self.source = Source::Test;
-        status("calls will use test tones and a test pattern, not your devices");
+        self.say("calls will use test tones and a test pattern, not your devices");
     }
 
     /// Use a named camera rather than whichever one the system ranks first.
@@ -140,7 +237,7 @@ impl Calls {
     /// Choose what to disclose when gathering.
     pub fn set_privacy(&mut self, privacy: Privacy) {
         self.privacy = privacy;
-        status(&format!(
+        self.say(format!(
             "calls will {}",
             match privacy {
                 Privacy::Direct => "connect directly; peers will see your IP address",
@@ -150,9 +247,9 @@ impl Calls {
     }
 
     /// Ask the server to start a call.
-    pub fn start(&self, handle: &Handle, target: &str) -> Result<()> {
+    pub fn start(&mut self, handle: &Handle, target: &str) -> Result<()> {
         if self.account.is_none() {
-            warn("you are not logged in: the other side cannot confirm who you are");
+            self.warn("you are not logged in: the other side cannot confirm who you are");
         }
         let wanted = if self.media.video {
             "audio,video"
@@ -165,7 +262,7 @@ impl Calls {
                 .param(target)
                 .param(wanted),
         )?;
-        status(&format!("calling {target}"));
+        self.say(format!("calling {target}"));
         Ok(())
     }
 
@@ -203,7 +300,7 @@ impl Calls {
             let _ = entry.call.hang_up(&peer, "declined");
         }
         self.forget_if_empty(&call_id);
-        status("declined");
+        self.say("declined");
         Ok(())
     }
 
@@ -229,7 +326,7 @@ impl Calls {
             handle.send(MessageBuf::new("CALL").param("LEAVE").param(&*call_id))?;
             self.close_call(&call_id);
         }
-        status("call ended");
+        self.say("call ended");
         Ok(())
     }
 
@@ -244,9 +341,9 @@ impl Calls {
             any |= entry.call.mark_verified(&peer);
         }
         if any {
-            status("verified; this key will be remembered");
+            self.say("verified; this key will be remembered");
         } else {
-            warn(
+            self.warn(
                 "nothing to verify: the peer is not logged in, so there is no account to remember a key against",
             );
         }
@@ -274,8 +371,9 @@ impl Calls {
         match verb {
             b"STARTED" => {
                 let target = text(0);
-                status(&format!("call {call_id} started on {target}"));
-                self.ensure_call(&call_id, &target);
+                self.say_in(&call_id, format!("call {call_id} started on {target}"));
+                let conversation = self.conversation(&target, &peer);
+                self.ensure_call(&call_id, &conversation);
 
                 // Calling a person invites them straight away. The server's
                 // own invitation only tells them somebody is calling; this is
@@ -289,21 +387,18 @@ impl Calls {
             }
             b"INVITE" => {
                 let target = text(0);
-                self.ensure_call(&call_id, &target);
-                status(&format!(
-                    "{}{peer} is calling{} — /answer or /reject",
-                    colour::GREEN,
-                    colour::RESET
-                ));
+                let conversation = self.conversation(&target, &peer);
+                self.ensure_call(&call_id, &conversation);
             }
             b"JOINED" => {
-                self.ensure_call(&call_id, &text(0));
+                let conversation = self.conversation(&text(0), &peer);
+                self.ensure_call(&call_id, &conversation);
                 // The server tells everyone, including the person who joined.
                 // Acting on our own arrival would have us invite ourselves.
                 if peer == self.nick {
                     return Ok(());
                 }
-                status(&format!("{peer} joined the call"));
+                self.say_in(&call_id, format!("{peer} joined the call"));
 
                 // Whoever was already in the call invites the newcomer, which
                 // builds a mesh without the server brokering it.
@@ -319,12 +414,15 @@ impl Calls {
                     // A payload we cannot read is not worth dropping the call
                     // over, but it is worth saying: it means somebody is out
                     // of step, or something rewrote it.
-                    Err(error) => warn(&format!("signalling from {peer} was rejected: {error}")),
+                    Err(error) => self.warn_in(
+                        &call_id,
+                        format!("signalling from {peer} was rejected: {error}"),
+                    ),
                 }
             }
             b"LEFT" | b"DECLINED" => {
                 if self.announce_departure(&call_id, &peer) {
-                    status(&format!("{peer} left the call"));
+                    self.say_in(&call_id, format!("{peer} left the call"));
                 }
                 if let Some(entry) = self.active.get_mut(&call_id) {
                     let _ = entry.call.hang_up(&peer, "left");
@@ -361,21 +459,22 @@ impl Calls {
             },
             PeerEvent::ConnectionState(state) => {
                 match state {
-                    ConnectionState::Connected => status(&format!(
-                        "{}connected to {peer}{}",
-                        colour::GREEN,
-                        colour::RESET
-                    )),
-                    ConnectionState::Failed => warn(&format!(
-                        "could not reach {peer}: no route worked. Both ends are probably \
+                    ConnectionState::Connected => {
+                        self.say_about(&peer, format!("connected to {peer}"));
+                    }
+                    ConnectionState::Failed => self.warn_about(
+                        &peer,
+                        format!(
+                            "could not reach {peer}: no route worked. Both ends are probably \
                          behind restrictive NATs and no relay is configured"
-                    )),
+                        ),
+                    ),
                     _ => {}
                 }
                 return Ok(());
             }
             PeerEvent::RemoteTrack { kind } => {
-                status(&format!("receiving {kind} from {peer}"));
+                self.say_about(&peer, format!("receiving {kind} from {peer}"));
                 return Ok(());
             }
             PeerEvent::Error(reason) => MediaEvent::Failed {
@@ -440,6 +539,20 @@ impl Calls {
         self.apply(handle, call_id, outcome)
     }
 
+    /// Which conversation a call belongs in, from here.
+    ///
+    /// The server names the call after whoever was dialled, which for the
+    /// person being dialled is themselves. A conversation with yourself is not
+    /// where you want to read that somebody is calling, so from that end it is
+    /// filed under the caller instead.
+    fn conversation(&self, target: &str, peer: &str) -> String {
+        if target == self.nick {
+            peer.to_owned()
+        } else {
+            target.to_owned()
+        }
+    }
+
     fn ensure_call(&mut self, call_id: &str, target: &str) {
         if self.active.contains_key(call_id) {
             return;
@@ -498,7 +611,7 @@ impl Calls {
                     if let Some(connection) = self.connections.get(&(call_id.to_owned(), peer))
                         && let Err(error) = connection.set_remote_description(&kind, &sdp)
                     {
-                        warn(&format!("could not apply a description: {error}"));
+                        self.warn(format!("could not apply a description: {error}"));
                     }
                 }
                 Action::AddCandidate {
@@ -526,43 +639,47 @@ impl Calls {
         match event {
             Event::Ringing { peer, account, .. } => {
                 let who = account.unwrap_or_else(|| format!("{peer} (not logged in)"));
-                status(&format!(
-                    "{}{who} is calling{} — /answer or /reject",
-                    colour::GREEN,
-                    colour::RESET
-                ));
+                self.highlight_in(call_id, format!("{who} is calling — answer or reject"));
                 if let Some(entry) = self.active.get_mut(call_id) {
                     entry.ringing.push(peer);
                 }
             }
             Event::Verify { peer, sas, trust } => {
                 match trust {
-                    Trust::Changed { .. } => warn(&format!(
-                        "{peer}'s key has CHANGED. Either they have a new device, or somebody \
+                    Trust::Changed { .. } => self.warn_in(
+                        call_id,
+                        format!(
+                            "{peer}'s key has CHANGED. Either they have a new device, or somebody \
                          is impersonating them. Do not continue until you have checked."
-                    )),
-                    Trust::Verified => status(&format!("{peer}'s key was verified previously")),
+                        ),
+                    ),
+                    Trust::Verified => {
+                        self.say_in(call_id, format!("{peer}'s key was verified previously"));
+                    }
                     Trust::New | Trust::Known => {}
                 }
-                // Printed rather than logged: this phrase is the only check
-                // that survives a hostile server, and it is worthless unless
-                // somebody actually reads it aloud.
-                println!(
-                    "{}== say this aloud to {peer}: {}{}{} ==  (/verify once it matches)",
-                    colour::CYAN,
-                    colour::BOLD,
-                    sas.phrase(),
-                    colour::RESET
+                // Shown prominently rather than logged: this phrase is the
+                // only check that survives a hostile server, and it is
+                // worthless unless somebody actually reads it aloud.
+                self.highlight_in(
+                    call_id,
+                    format!(
+                        "say this aloud to {peer}: {} — verify once it matches",
+                        sas.phrase()
+                    ),
                 );
             }
             Event::PeerGone { peer, reason } => {
                 if self.announce_departure(call_id, &peer) {
-                    status(&format!("{peer} left the call ({reason})"));
+                    self.say_in(call_id, format!("{peer} left the call ({reason})"));
                 }
                 self.connections.remove(&(call_id.to_owned(), peer));
             }
             Event::PeerFailed { peer, reason } => {
-                warn(&format!("the connection to {peer} failed: {reason}"));
+                self.warn_in(
+                    call_id,
+                    format!("the connection to {peer} failed: {reason}"),
+                );
             }
         }
     }
@@ -581,7 +698,7 @@ impl Calls {
         if matches!(self.source, Source::Devices { .. }) {
             // Said before it happens, not after. On Windows the default camera
             // can be a paired phone, so opening it makes that phone ring.
-            status(&format!(
+            self.say(format!(
                 "opening your {} — pass --test-media to use test patterns instead",
                 if sending.video {
                     "microphone and camera"
@@ -612,7 +729,7 @@ impl Calls {
                 });
                 self.connections.insert(key, connection);
             }
-            Err(error) => warn(&format!("could not open the microphone or camera: {error}")),
+            Err(error) => self.warn(format!("could not open the microphone or camera: {error}")),
         }
     }
 

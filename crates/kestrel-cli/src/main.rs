@@ -4,7 +4,6 @@
 //! exercise `kestrel-session` against a real server, and every behaviour it
 //! shows is the same code the graphical client will use.
 
-mod calls;
 mod render;
 mod ui;
 
@@ -234,7 +233,7 @@ async fn main() -> Result<()> {
     if let Err(error) = kestrel_media::init() {
         ui::warn(&format!("calls are unavailable: {error}"));
     }
-    let mut calls = calls::Calls::new(media_tx);
+    let mut calls = kestrel_client::Calls::new(media_tx);
     if options.test_media {
         calls.use_test_media();
     }
@@ -315,6 +314,12 @@ async fn main() -> Result<()> {
                 ui::status("interrupted; quitting");
                 let _ = handle.quit("Interrupted");
             }
+        }
+
+        // Whatever the call machinery has to say, said here: every branch
+        // above converges on this, so nothing can go unreported by forgetting.
+        for notice in calls.take_notices() {
+            ui::show_notice(&notice);
         }
     }
 

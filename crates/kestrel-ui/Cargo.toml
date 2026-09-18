@@ -14,6 +14,8 @@ path = "src/main.rs"
 
 [dependencies]
 kestrel-net.workspace = true
+kestrel-client.workspace = true
+kestrel-media.workspace = true
 kestrel-proto.workspace = true
 kestrel-session.workspace = true
 gtk.workspace = true

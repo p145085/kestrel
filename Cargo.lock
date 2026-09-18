@@ -990,12 +990,27 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "kestrel-call",
+ "kestrel-client",
  "kestrel-crypto",
  "kestrel-media",
  "kestrel-net",
  "kestrel-proto",
  "kestrel-rtc-proto",
  "kestrel-session",
+ "tokio",
+]
+
+[[package]]
+name = "kestrel-client"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "kestrel-call",
+ "kestrel-crypto",
+ "kestrel-media",
+ "kestrel-net",
+ "kestrel-proto",
+ "kestrel-rtc-proto",
  "tokio",
 ]
 
@@ -1079,6 +1094,8 @@ dependencies = [
  "anyhow",
  "async-channel",
  "gtk4",
+ "kestrel-client",
+ "kestrel-media",
  "kestrel-net",
  "kestrel-proto",
  "kestrel-session",

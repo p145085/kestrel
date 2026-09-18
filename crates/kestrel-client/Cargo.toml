@@ -1,0 +1,22 @@
+[package]
+name = "kestrel-client"
+description = "Client-side orchestration: calls, media and the server connection."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+kestrel-call.workspace = true
+kestrel-crypto.workspace = true
+kestrel-media.workspace = true
+kestrel-net.workspace = true
+kestrel-proto.workspace = true
+kestrel-rtc-proto.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+anyhow.workspace = true
+
+[lints]
+workspace = true

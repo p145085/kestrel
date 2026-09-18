@@ -48,11 +48,12 @@ something you would daily-drive.
       negotiation, SASL, and tracked channel and member state
 - [x] `kestrel-net` — the client transport, plaintext and TLS
 - [x] `kestrel-cli` — a terminal client. **Works today**
-- [~] `kestrel-ui` — the GTK client. **Connects, joins and chats**, with a
-      connection dialog, menu bar, buffer list, member list and topic. The
-      Call menu is present but disabled: calls are not wired into it yet
+- [x] `kestrel-ui` — the GTK client: a connection dialog, menu bar, buffer
+      list, member list, topic, **and calls**
 - [x] `xtask bundle` — a folder that runs without GStreamer or GTK installed
 - [x] `kestrel-call` — the call state machine: consent, key exchange, mesh
+- [x] `kestrel-client` — the layer both clients share, so that a call
+      behaves the same whichever one you are looking at
 - [x] `kestrel-crypto` — identity, sealed payloads, short authentication strings
 - [x] `kestrel-rtc-proto` — compact session descriptions and signalling frames
 - [x] `kestrel-media` — GStreamer engine, with camera selection on Windows
@@ -118,12 +119,24 @@ that first line the interface dies at startup with `STATUS_DLL_NOT_FOUND`
 Packaging will ship the libraries beside the executable; until then, the shell
 has to be set up.
 
-For a call, run the terminal client twice and use `/call <nick>`, then
-`/answer`. Both ends print a four-word phrase; say it aloud to check nobody
-is in the middle, and `/verify` once it matches. `--test-media` uses test
-patterns instead of your camera, and `--list-cameras` shows what is
-available -- worth checking, since Windows may rank a paired phone ahead of
-anything plugged in.
+For a call, use the **Call** menu in the window, or `/call <nick>` and
+`/answer` in the terminal client. Both ends show a four-word phrase; say it
+aloud to check nobody is in the middle, and confirm it once it matches.
+
+`--test-media` uses test patterns instead of your camera, and
+`--list-cameras` (terminal client) shows what is available -- worth
+checking, since Windows may rank a paired phone ahead of anything plugged
+in.
+
+To watch what the window is doing without opening one:
+
+```powershell
+cargo run -p kestrel-ui --example dump_events -- `
+    127.0.0.1:6667 alice '#test' --test-media --call bob
+```
+
+That runs the interface's own half of a connection and prints every event it
+would show, which is how the call wiring is tested without a display.
 
 **The server works.** You can point HexChat, WeeChat or irssi at it today and
 chat: register, join channels, set modes and topics, kick, ban, and authenticate

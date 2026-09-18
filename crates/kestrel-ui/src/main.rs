@@ -18,6 +18,7 @@ use gtk::prelude::*;
 use kestrel_net::ConnectConfig;
 use kestrel_session::SessionConfig;
 use kestrel_session::config::Sasl;
+use kestrel_ui::connection::CallOptions;
 
 const USAGE: &str = "\
 kestrel-ui — Kestrel's graphical IRC client
@@ -34,6 +35,9 @@ OPTIONS:
     -p, --pass <pass>    Server password
         --sasl <account> Authenticate as this account
         --sasl-pass <p>  Password for SASL
+        --test-media     Use test tones instead of your microphone and camera
+        --camera <name>  Use the camera whose name contains <name>
+        --audio-only     Do not offer video
         --tls            Connect with TLS (default port 6697)
         --insecure       With --tls, accept any certificate
     -h, --help           Show this
@@ -44,6 +48,7 @@ struct Options {
     /// Absent when no server was named, which is what opens the dialog.
     connect: Option<ConnectConfig>,
     session: SessionConfig,
+    calls: CallOptions,
 }
 
 fn main() -> Result<()> {
@@ -71,13 +76,19 @@ fn main() -> Result<()> {
         Some(Options {
             connect: Some(connect),
             session,
+            calls,
         }) => {
-            if let Err(error) = window::open(app, connect, session) {
+            if let Err(error) = window::open(app, connect, session, calls) {
                 eprintln!("could not start: {error:#}");
             }
         }
         // Nothing on the command line, so ask.
-        Some(Options { connect: None, .. }) | None => connect::show(app, None),
+        Some(Options {
+            connect: None,
+            calls,
+            ..
+        }) => connect::show(app, None, &calls),
+        None => connect::show(app, None, &CallOptions::default()),
     });
 
     // Emptied deliberately: GTK would otherwise try to parse our arguments and
@@ -103,6 +114,7 @@ fn parse_args() -> Result<Option<Options>> {
     let mut server_password = None;
     let mut sasl_account = None;
     let mut sasl_password = None;
+    let mut calls = CallOptions::default();
 
     let mut index = 0;
     while index < args.len() {
@@ -116,6 +128,9 @@ fn parse_args() -> Result<Option<Options>> {
         match arg.as_str() {
             "--tls" => tls = true,
             "--insecure" => insecure = true,
+            "--test-media" => calls.test_media = true,
+            "--audio-only" => calls.audio_only = true,
+            "--camera" => calls.camera = Some(next("--camera")?),
             "-n" | "--nick" => nick = Some(next("--nick")?),
             "-r" | "--real" => realname = Some(next("--real")?),
             "-j" | "--join" => join = next("--join")?.split(',').map(str::to_owned).collect(),
@@ -163,5 +178,9 @@ fn parse_args() -> Result<Option<Options>> {
         });
     }
 
-    Ok(Some(Options { connect, session }))
+    Ok(Some(Options {
+        connect,
+        session,
+        calls,
+    }))
 }

@@ -17,6 +17,7 @@ kestrel-proto.workspace = true
 kestrel-session.workspace = true
 kestrel-net.workspace = true
 kestrel-call.workspace = true
+kestrel-client.workspace = true
 kestrel-crypto.workspace = true
 kestrel-media.workspace = true
 kestrel-rtc-proto.workspace = true

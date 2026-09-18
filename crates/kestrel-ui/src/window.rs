@@ -12,7 +12,8 @@ use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use kestrel_net::ConnectConfig;
 use kestrel_session::SessionConfig;
-use kestrel_ui::event::{AppEvent, BufferId, Line, LineKind, SERVER_BUFFER, UiCommand};
+use kestrel_ui::connection::CallOptions;
+use kestrel_ui::event::{AppEvent, BufferId, CallAction, Line, LineKind, SERVER_BUFFER, UiCommand};
 use tokio::sync::mpsc;
 
 /// What the server buffer is called in the sidebar, since its id is empty.
@@ -41,6 +42,12 @@ struct State {
     connected: bool,
     /// Where this window was last pointed, so it can be pointed there again.
     last: Option<(ConnectConfig, SessionConfig)>,
+    /// How calls from this window are placed.
+    call_options: CallOptions,
+    /// Somebody is ringing.
+    ringing: bool,
+    /// A call is in progress.
+    in_call: bool,
 }
 
 /// The window and the things that change inside it.
@@ -166,6 +173,9 @@ impl Window {
                 server: String::new(),
                 connected: true,
                 last: None,
+                call_options: CallOptions::default(),
+                ringing: false,
+                in_call: false,
             })),
             commands: Rc::new(RefCell::new(commands)),
             selecting: Rc::new(RefCell::new(false)),
@@ -258,6 +268,14 @@ impl Window {
                 if self.state.borrow().current == buffer {
                     self.redraw_topic();
                 }
+            }
+            AppEvent::CallState { ringing, active } => {
+                {
+                    let mut state = self.state.borrow_mut();
+                    state.ringing = ringing;
+                    state.in_call = active;
+                }
+                self.update_actions();
             }
             AppEvent::Disconnected { reason } => {
                 self.state.borrow_mut().connected = false;
@@ -554,7 +572,9 @@ impl Window {
         let application = app.clone();
         let action = gio::SimpleAction::new("connect", None);
         let from = self.clone();
-        action.connect_activate(move |_, _| crate::connect::show(&application, Some(from.clone())));
+        action.connect_activate(move |_, _| {
+            crate::connect::show(&application, Some(from.clone()), &from.call_options());
+        });
         window.add_action(&action);
 
         // Redialling where we already were, which after a dropped connection
@@ -570,6 +590,29 @@ impl Window {
                 );
             }
         });
+
+        self.add_action(window, "answer", |ui| ui.call(CallAction::Answer));
+        self.add_action(window, "reject", |ui| ui.call(CallAction::Reject));
+        self.add_action(window, "hangup", |ui| ui.call(CallAction::HangUp));
+        self.add_action(window, "verify", |ui| ui.call(CallAction::Verify));
+        // Its own action rather than a slash command: a call is not text, and
+        // routing it through the message parser would only invent a syntax.
+        let action = gio::SimpleAction::new("call", None);
+        let ui = self.clone();
+        action.connect_activate(move |_, _| {
+            // Whoever is on screen is almost always who you mean to call.
+            let initial = ui.state.borrow().current.clone();
+            let target = ui.clone();
+            ui.prompt(
+                "Start a Call",
+                "Who, or which channel",
+                &initial,
+                move |who| {
+                    target.call(CallAction::Start(who));
+                },
+            );
+        });
+        window.add_action(&action);
 
         self.add_action(window, "names", |ui| ui.run("/names"));
         self.add_action(window, "part", |ui| ui.run("/part"));
@@ -649,15 +692,25 @@ impl Window {
         let current = self.state.borrow().current.clone();
         let in_channel = current.starts_with('#') || current.starts_with('&');
 
-        let connected = self.state.borrow().connected;
+        let (connected, ringing, in_call, has_last) = {
+            let state = self.state.borrow();
+            (
+                state.connected,
+                state.ringing,
+                state.in_call,
+                state.last.is_some(),
+            )
+        };
         for (name, enabled) in [
             ("part", in_channel && connected),
             ("topic", in_channel && connected),
             ("names", in_channel && connected),
-            (
-                "reconnect",
-                !connected && self.state.borrow().last.is_some(),
-            ),
+            ("reconnect", !connected && has_last),
+            ("call", connected && !in_call),
+            ("answer", connected && ringing),
+            ("reject", connected && ringing),
+            ("hangup", connected && in_call),
+            ("verify", connected && in_call),
         ] {
             if let Some(action) = window
                 .lookup_action(name)
@@ -748,6 +801,11 @@ impl Window {
         dialog.show(self.window().as_ref());
     }
 
+    /// Ask the connection to do something with a call.
+    fn call(&self, action: CallAction) {
+        let _ = self.commands.borrow().send(UiCommand::Call(action));
+    }
+
     /// Put something through the same path as typing it.
     fn run(&self, input: &str) {
         let buffer = self.state.borrow().current.clone();
@@ -783,10 +841,16 @@ pub fn open(
     app: &gtk::Application,
     connect: ConnectConfig,
     session: SessionConfig,
+    options: CallOptions,
 ) -> anyhow::Result<()> {
-    let (commands, events) = kestrel_ui::connection::start(connect.clone(), session.clone())?;
+    let (commands, events) =
+        kestrel_ui::connection::start(connect.clone(), session.clone(), options.clone())?;
     let (ui, window) = Window::build(app, commands);
-    ui.state.borrow_mut().last = Some((connect, session));
+    {
+        let mut state = ui.state.borrow_mut();
+        state.last = Some((connect, session));
+        state.call_options = options;
+    }
     pump(ui.clone(), events);
 
     // Leaving properly rather than dropping the socket, so the server and
@@ -812,7 +876,9 @@ impl Window {
     /// said before the connection dropped is usually what you want to see
     /// after it comes back.
     pub fn redial(&self, connect: ConnectConfig, session: SessionConfig) -> anyhow::Result<()> {
-        let (commands, events) = kestrel_ui::connection::start(connect.clone(), session.clone())?;
+        let options = self.call_options();
+        let (commands, events) =
+            kestrel_ui::connection::start(connect.clone(), session.clone(), options)?;
         *self.commands.borrow_mut() = commands;
         {
             let mut state = self.state.borrow_mut();
@@ -836,6 +902,12 @@ impl Window {
     pub fn last_connection(&self) -> Option<(ConnectConfig, SessionConfig)> {
         self.state.borrow().last.clone()
     }
+
+    /// How calls from this window are placed.
+    #[must_use]
+    pub fn call_options(&self) -> CallOptions {
+        self.state.borrow().call_options.clone()
+    }
 }
 
 /// Every action the menu may refer to.
@@ -843,9 +915,11 @@ impl Window {
 /// Named in one place so a menu entry pointing at an action nobody installed
 /// cannot slip through: GTK renders such an entry greyed out and says nothing,
 /// which looks exactly like a feature that is merely unavailable.
-const ACTIONS: [&str; 13] = [
+const ACTIONS: [&str; 15] = [
     "connect",
     "reconnect",
+    "verify",
+    "reject",
     "join",
     "query",
     "nick",
@@ -880,6 +954,8 @@ fn menu_model() -> gio::Menu {
     let call = gio::Menu::new();
     call.append(Some("Start Call…"), Some("win.call"));
     call.append(Some("Answer"), Some("win.answer"));
+    call.append(Some("Reject"), Some("win.reject"));
+    call.append(Some("Confirm Spoken Phrase"), Some("win.verify"));
     call.append(Some("Hang Up"), Some("win.hangup"));
 
     let help = gio::Menu::new();
@@ -896,6 +972,7 @@ fn menu_model() -> gio::Menu {
 /// Which tag paints the name at the start of a line.
 fn nick_tag(kind: LineKind) -> &'static str {
     match kind {
+        LineKind::Highlight => "highlight",
         LineKind::Action => "action",
         LineKind::Notice => "notice",
         LineKind::Own => "own-nick",
@@ -906,6 +983,7 @@ fn nick_tag(kind: LineKind) -> &'static str {
 /// Which tag paints the rest of it.
 fn body_tag(kind: LineKind) -> &'static str {
     match kind {
+        LineKind::Highlight => "highlight",
         LineKind::Action => "action",
         LineKind::Notice => "notice",
         LineKind::Status => "status",
@@ -937,6 +1015,7 @@ fn add_tags(table: &gtk::TextTagTable) {
     tag("error", "#f7768e", false);
     tag("notice", "#e0af68", false);
     tag("action", "#bb9af7", false);
+    tag("highlight", "#7dcfff", true);
 }
 
 fn parse_colour(hex: &str) -> gdk::RGBA {

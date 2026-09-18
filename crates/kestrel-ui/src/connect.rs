@@ -9,13 +9,15 @@ use gtk::prelude::*;
 use kestrel_net::ConnectConfig;
 use kestrel_session::SessionConfig;
 
+use kestrel_ui::connection::CallOptions;
+
 use crate::window;
 
 /// Show the connection window.
 // Building a form is linear by nature: every field is three lines and
 // splitting them across functions would only hide the layout.
 #[allow(clippy::too_many_lines)]
-pub fn show(app: &gtk::Application, from: Option<window::Window>) {
+pub fn show(app: &gtk::Application, from: Option<window::Window>, options: &CallOptions) {
     let server = entry("127.0.0.1");
     let port = entry("6667");
     let nick = entry(&default_nick());
@@ -112,6 +114,8 @@ pub fn show(app: &gtk::Application, from: Option<window::Window>) {
         // A window whose connection has ended is reused rather than left
         // behind as a dead one beside a live one.
         let reuse = from.filter(|window| !window.is_connected());
+        let options = options.clone();
+
         let fields = Fields {
             server: server.clone(),
             port: port.clone(),
@@ -125,7 +129,7 @@ pub fn show(app: &gtk::Application, from: Option<window::Window>) {
             Ok((connect, session)) => {
                 let opened = match &reuse {
                     Some(window) => window.redial(connect, session),
-                    None => window::open(&app, connect, session),
+                    None => window::open(&app, connect, session, options.clone()),
                 };
                 if let Err(error) = opened {
                     problem.set_text(&format!("{error:#}"));

@@ -5,7 +5,8 @@ use kestrel_call::Privacy;
 use kestrel_net::Handle;
 use kestrel_proto::MessageBuf;
 
-use crate::calls::Calls;
+use kestrel_client::Calls;
+use kestrel_client::{Level, Notice};
 
 /// ANSI colours, kept here so the rest of the client reads as plain text.
 pub mod colour {
@@ -63,6 +64,23 @@ impl State {
 }
 
 /// Print a status line.
+/// Show one notice from the call machinery.
+pub fn show_notice(notice: &Notice) {
+    match notice.level {
+        Level::Info => status(&notice.text),
+        Level::Warning => warn(&notice.text),
+        // Loud on purpose: an incoming call and the phrase two people read to
+        // each other are both worthless if they scroll past unnoticed.
+        Level::Highlight => println!(
+            "{}{}== {} =={}",
+            colour::CYAN,
+            colour::BOLD,
+            notice.text,
+            colour::RESET
+        ),
+    }
+}
+
 pub fn status(text: &str) {
     println!("{}--{} {text}", colour::DIM, colour::RESET);
 }
