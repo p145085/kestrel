@@ -22,6 +22,15 @@ use tokio::sync::mpsc;
 use crate::notice::{Level, Notice};
 use crate::store::Store;
 
+/// How a conversation is keyed when remembering something about it.
+///
+/// Nicknames and channel names are case-insensitive on IRC, so `Emila` and
+/// `emila` are one person. A plain map is not, and the difference shows up as
+/// a setting that appears to be accepted and then quietly does nothing.
+fn conversation_key(target: &str) -> String {
+    target.to_lowercase()
+}
+
 /// A media event tagged with the peer it came from.
 #[derive(Debug)]
 pub struct TaggedMediaEvent {
@@ -338,7 +347,7 @@ impl Calls {
                     .unwrap_or_else(|| "the default microphone".into())
             ),
         };
-        self.per_target.insert(target.to_owned(), source);
+        self.per_target.insert(conversation_key(target), source);
         self.notices.push(Notice::in_target(
             Level::Info,
             format!("calls here will use {description}"),
@@ -350,7 +359,7 @@ impl Calls {
     #[must_use]
     pub fn devices_for(&self, target: &str) -> Source {
         self.per_target
-            .get(target)
+            .get(&conversation_key(target))
             .cloned()
             .unwrap_or_else(|| self.source.clone())
     }
@@ -604,7 +613,8 @@ impl Calls {
             self.warn_about(
                 &peer,
                 format!(
-                    "your {what} stopped working ({detail}). It is probably in use by                      another program -- the call continues without it"
+                    "your {what} stopped working: {detail}. It may be in use by another \
+                     program, or it may have been unplugged. The call continues without it."
                 ),
             );
             return Ok(());
@@ -872,7 +882,7 @@ impl Calls {
             // Said before it happens, not after. On Windows the default camera
             // can be a paired phone, so opening it makes that phone ring.
             self.say(format!(
-                "opening your {} — pass --test-media to use test patterns instead",
+                "opening your {}",
                 if sending.video {
                     "microphone and camera"
                 } else {
@@ -900,6 +910,21 @@ impl Calls {
                         }
                     }
                 });
+                // What was opened, not what was asked for. A name that
+                // matched nothing falls back silently, and the difference is
+                // exactly what somebody wondering why their choice did nothing
+                // needs to see.
+                let devices = connection.devices().clone();
+                if let Some(camera) = devices.camera {
+                    self.say_in(call_id, format!("sending video from {camera}"));
+                }
+                if let Some(microphone) = devices.microphone {
+                    self.say_in(call_id, format!("sending audio from {microphone}"));
+                }
+                if matches!(source, Source::Test) {
+                    self.say_in(call_id, "sending a test picture and tone");
+                }
+
                 self.connections.insert(key, connection);
                 if sending.video {
                     // Asked for now rather than when the first frame arrives:
@@ -947,5 +972,49 @@ impl Calls {
             let _ = entry.target;
         }
         self.connections.retain(|(id, _), _| id != call_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn calls() -> Calls {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        Calls::new(tx)
+    }
+
+    #[test]
+    fn devices_chosen_for_a_conversation_are_used_for_it() {
+        let mut calls = calls();
+        calls.set_devices(
+            "bob",
+            Source::Devices {
+                camera: Some("USB Camera".to_owned()),
+                microphone: None,
+            },
+        );
+
+        match calls.devices_for("bob") {
+            Source::Devices { camera, .. } => assert_eq!(camera.as_deref(), Some("USB Camera")),
+            Source::Test => panic!("expected the chosen camera, got a test picture"),
+        }
+    }
+
+    #[test]
+    fn a_conversation_is_the_same_conversation_in_any_case() {
+        // Nicknames and channels are case-insensitive on IRC; a map is not,
+        // and the difference reads as a setting that silently did nothing.
+        let mut calls = calls();
+        calls.set_devices("Emila", Source::Test);
+        assert!(matches!(calls.devices_for("emila"), Source::Test));
+        assert!(matches!(calls.devices_for("EMILA"), Source::Test));
+    }
+
+    #[test]
+    fn a_conversation_with_no_choice_falls_back_to_the_client_default() {
+        let mut calls = calls();
+        calls.use_test_media();
+        assert!(matches!(calls.devices_for("nobody"), Source::Test));
     }
 }

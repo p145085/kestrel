@@ -533,14 +533,34 @@ impl Window {
             } else {
                 label.clone()
             };
+
+            // Channels and conversations sit under the server they belong to,
+            // one character in, so the list reads as a tree rather than a pile
+            // once there is more than one connection in the window.
+            let indent = if id.is_empty() { 8 } else { 20 };
             let widget = gtk::Label::builder()
                 .label(&text)
                 .xalign(0.0)
-                .margin_start(8)
+                .margin_start(indent)
                 .margin_end(8)
                 .margin_top(4)
                 .margin_bottom(4)
                 .build();
+
+            let menu = gtk::PopoverMenu::from_model(Some(&buffer_menu(id)));
+            menu.set_parent(&widget);
+            menu.set_has_arrow(false);
+            menu.set_halign(gtk::Align::Start);
+
+            let click = gtk::GestureClick::new();
+            click.set_button(gdk::BUTTON_SECONDARY);
+            let showing = menu.clone();
+            click.connect_pressed(move |_, _, x, y| {
+                showing.set_pointing_to(Some(&gdk::Rectangle::new(at(x), at(y), 1, 1)));
+                showing.popup();
+            });
+            widget.add_controller(click);
+
             self.sidebar.append(&widget);
             if id == &current {
                 selected = Some(index);
@@ -599,15 +619,6 @@ impl Window {
             click.set_button(gdk::BUTTON_SECONDARY);
             let showing = menu.clone();
             click.connect_pressed(move |_, _, x, y| {
-                // A pointer lands on a whole pixel by the time it reaches a
-                // rectangle; the fraction carries no meaning here.
-                let at = |value: f64| {
-                    let clamped = value.round().clamp(0.0, f64::from(i32::MAX));
-                    #[allow(clippy::cast_possible_truncation)]
-                    {
-                        clamped as i32
-                    }
-                };
                 showing.set_pointing_to(Some(&gdk::Rectangle::new(at(x), at(y), 1, 1)));
                 showing.popup();
             });
@@ -656,6 +667,8 @@ impl Window {
     /// Every entry goes through the same command parsing as typing the
     /// equivalent slash command, so there is one implementation of what
     /// joining a channel means rather than two that can drift apart.
+    // One block per action, which is long but entirely flat.
+    #[allow(clippy::too_many_lines)]
     fn install_actions(&self, app: &gtk::Application, window: &gtk::ApplicationWindow) {
         self.add_prompt_action(window, "join", "Join Channel", "Channel", "#", |name| {
             format!("/join {name}")
@@ -702,6 +715,23 @@ impl Window {
 
         // Actions that carry who they are about, for the member list's own
         // menu. A plain action cannot say which person was clicked.
+        // Closing a conversation: parting a channel if it is one, and simply
+        // forgetting the buffer if it is not.
+        {
+            let action = gio::SimpleAction::new("close-buffer", Some(glib::VariantTy::STRING));
+            let ui = self.clone();
+            action.connect_activate(move |_, parameter| {
+                let Some(name) = parameter.and_then(glib::Variant::str) else {
+                    return;
+                };
+                if name.starts_with('#') || name.starts_with('&') {
+                    ui.run(&format!("/part {name}"));
+                }
+                ui.close_buffer(name);
+            });
+            window.add_action(&action);
+        }
+
         for name in ["call-nick", "query-nick", "whois-nick"] {
             let action = gio::SimpleAction::new(name, Some(glib::VariantTy::STRING));
             let ui = self.clone();
@@ -1305,6 +1335,34 @@ const ACTIONS: [&str; 18] = [
     "answer",
     "hangup",
 ];
+
+/// Where a pointer landed, as a rectangle a popover can point at.
+///
+/// A pointer is on a whole pixel by the time it reaches a rectangle, so the
+/// fraction carries no meaning; clamping keeps a nonsensical coordinate from
+/// wrapping into a negative one.
+fn at(value: f64) -> i32 {
+    let clamped = value.round().clamp(0.0, f64::from(i32::MAX));
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        clamped as i32
+    }
+}
+
+/// What a right click on a buffer in the list offers.
+///
+/// A server buffer is the connection itself, so the only thing to do with it
+/// is disconnect; everything else is a conversation that can simply be closed.
+fn buffer_menu(id: &str) -> gio::Menu {
+    let menu = gio::Menu::new();
+    if id.is_empty() {
+        menu.append(Some("Disconnect"), Some("win.disconnect"));
+        menu.append(Some("Reconnect"), Some("win.reconnect"));
+    } else {
+        menu.append(Some("Close"), Some(&format!("win.close-buffer::{id}")));
+    }
+    menu
+}
 
 /// What a right click on somebody in the member list offers.
 ///

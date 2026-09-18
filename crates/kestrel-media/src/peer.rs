@@ -268,6 +268,20 @@ impl VideoSlot {
     }
 }
 
+/// The capture devices a connection actually opened.
+///
+/// What was asked for and what was opened are not always the same: a name may
+/// match nothing, a device may be busy, and the fallback is silent. Reporting
+/// the real answer is the difference between "my setting did nothing" being a
+/// guess and being a fact.
+#[derive(Debug, Clone, Default)]
+pub struct Devices {
+    /// The camera, if one was opened.
+    pub camera: Option<String>,
+    /// The microphone, if one was opened.
+    pub microphone: Option<String>,
+}
+
 /// One connection to one peer.
 pub struct PeerConnection {
     pipeline: gst::Pipeline,
@@ -279,6 +293,8 @@ pub struct PeerConnection {
     video: VideoSlot,
     /// Where our own camera is drawn.
     self_view: VideoSlot,
+    /// What was actually opened, as the system names it.
+    devices: Devices,
     /// When the pipeline started playing.
     opened: std::time::Instant,
 }
@@ -318,12 +334,14 @@ impl PeerConnection {
             .add(&webrtc)
             .map_err(|_| MediaError::Pipeline("could not add webrtcbin".into()))?;
 
+        let mut microphone = None;
         if sending.audio {
-            add_audio(&pipeline, &webrtc, source)?;
+            microphone = add_audio(&pipeline, &webrtc, source)?;
         }
         let self_view = VideoSlot::default();
+        let mut camera = None;
         if sending.video {
-            add_video(&pipeline, &webrtc, source, &self_view)?;
+            camera = add_video(&pipeline, &webrtc, source, &self_view)?;
         }
 
         let (events, receiver) = mpsc::unbounded_channel();
@@ -344,6 +362,7 @@ impl PeerConnection {
                 gate,
                 video,
                 self_view,
+                devices: Devices { camera, microphone },
                 opened: std::time::Instant::now(),
             },
             receiver,
@@ -413,6 +432,12 @@ impl PeerConnection {
     /// camera away from it.
     pub fn set_self_view_sink(&self, sink: gst::Element) -> Result<(), MediaError> {
         self.replace_in(&self.self_view, sink)
+    }
+
+    /// What this connection actually captures from.
+    #[must_use]
+    pub fn devices(&self) -> &Devices {
+        &self.devices
     }
 
     /// Ask for an offer. The result arrives as [`PeerEvent::LocalDescription`].
@@ -995,10 +1020,11 @@ fn backend_rank(device: &gst::Device) -> u8 {
 }
 
 /// Build a source for whichever device the system ranks first.
-fn first_device(devices: &[gst::Device]) -> Option<gst::Element> {
+fn first_device(devices: &[gst::Device]) -> Option<(gst::Element, String)> {
     let device = devices.first()?;
-    debug!("opening the default device, {}", device.display_name());
-    device.create_element(None).ok()
+    let name = device.display_name().to_string();
+    debug!("opening the default device, {name}");
+    Some((device.create_element(None).ok()?, name))
 }
 
 /// Build a source for the first device whose name contains `wanted`.
@@ -1006,20 +1032,22 @@ fn first_device(devices: &[gst::Device]) -> Option<gst::Element> {
 /// Returns `None` when nothing matches, leaving the caller to fall back to the
 /// default rather than failing outright -- a camera unplugged since it was
 /// chosen should not stop a call from happening at all.
-fn open_device(devices: &[gst::Device], wanted: &str) -> Option<gst::Element> {
+fn open_device(devices: &[gst::Device], wanted: &str) -> Option<(gst::Element, String)> {
     let wanted = wanted.to_lowercase();
     let device = devices
         .iter()
         .find(|device| device.display_name().to_lowercase().contains(&wanted))?;
-    debug!("opening device {}", device.display_name());
-    device.create_element(None).ok()
+    let name = device.display_name().to_string();
+    debug!("opening device {name}");
+    Some((device.create_element(None).ok()?, name))
 }
 
 fn add_audio(
     pipeline: &gst::Pipeline,
     webrtc: &gst::Element,
     source: &Source,
-) -> Result<(), MediaError> {
+) -> Result<Option<String>, MediaError> {
+    let mut opened = None;
     let src = match source {
         Source::Test => gst::ElementFactory::make("audiotestsrc")
             .property("is-live", true)
@@ -1032,7 +1060,10 @@ fn add_audio(
                 None => first_device(&microphones),
             };
             match chosen {
-                Some(src) => Ok(src),
+                Some((src, name)) => {
+                    opened = Some(name);
+                    Ok(src)
+                }
                 None => gst::ElementFactory::make("wasapi2src")
                     .property("low-latency", true)
                     .build()
@@ -1060,7 +1091,7 @@ fn add_audio(
         .map_err(|_| MediaError::Pipeline("could not link the audio chain".into()))?;
     pay.link(webrtc)
         .map_err(|_| MediaError::Pipeline("could not link audio to webrtcbin".into()))?;
-    Ok(())
+    Ok(opened)
 }
 
 fn add_video(
@@ -1068,7 +1099,8 @@ fn add_video(
     webrtc: &gst::Element,
     source: &Source,
     self_view: &VideoSlot,
-) -> Result<(), MediaError> {
+) -> Result<Option<String>, MediaError> {
+    let mut opened = None;
     let src = match source {
         Source::Test => gst::ElementFactory::make("videotestsrc")
             .property("is-live", true)
@@ -1086,7 +1118,10 @@ fn add_video(
                 None => first_device(&cameras),
             };
             match chosen {
-                Some(src) => Ok(src),
+                Some((src, name)) => {
+                    opened = Some(name);
+                    Ok(src)
+                }
                 None => gst::ElementFactory::make("mfvideosrc")
                     .build()
                     .or_else(|_| gst::ElementFactory::make("autovideosrc").build()),
@@ -1169,7 +1204,7 @@ fn add_video(
         // start because of one is not.
         Err(error) => warn!("no self view: {error}"),
     }
-    Ok(())
+    Ok(opened)
 }
 
 /// Attach a branch of a tee to an element.
@@ -1233,6 +1268,36 @@ mod tests {
             .map_or_else(|| "none".to_owned(), |f| f.name().to_string());
         let _ = pipeline.set_state(gst::State::Null);
         name
+    }
+
+    #[test]
+    fn asking_for_a_device_by_name_gets_that_device() {
+        // Selection falls back silently when a name matches nothing, which is
+        // indistinguishable from the choice having been ignored. Building the
+        // element does not open the hardware, so this costs nothing.
+        crate::init().expect("GStreamer should initialise");
+
+        for kind in [video_devices(), audio_devices()] {
+            for device in &kind {
+                let wanted = device.display_name().to_string();
+                let Some((_, opened)) = open_device(&kind, &wanted) else {
+                    panic!("asking for {wanted} found nothing");
+                };
+                assert_eq!(
+                    opened, wanted,
+                    "asking for {wanted} opened {opened} instead"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_name_that_matches_nothing_is_refused_rather_than_substituted() {
+        crate::init().expect("GStreamer should initialise");
+        assert!(
+            open_device(&video_devices(), "no such camera exists anywhere").is_none(),
+            "a miss has to be visible, or the caller cannot fall back deliberately"
+        );
     }
 
     #[test]
