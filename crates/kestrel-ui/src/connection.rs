@@ -176,6 +176,23 @@ async fn show(events: &async_channel::Sender<AppEvent>, line: Line) {
         .await;
 }
 
+/// Open a connection and hand back both ends of it.
+///
+/// The pair is what an interface needs: somewhere to send what the user does,
+/// and somewhere to read what happened. Creating them together means a caller
+/// cannot wire one up and forget the other.
+pub fn start(
+    connect: ConnectConfig,
+    session: SessionConfig,
+) -> Result<(
+    mpsc::UnboundedSender<UiCommand>,
+    async_channel::Receiver<AppEvent>,
+)> {
+    let (events_tx, events_rx) = async_channel::unbounded();
+    let commands = spawn(connect, session, events_tx)?;
+    Ok((commands, events_rx))
+}
+
 /// Start the tokio half on a thread of its own.
 ///
 /// GTK owns the process's main thread and its main loop, so the runtime cannot

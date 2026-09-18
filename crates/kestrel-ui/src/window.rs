@@ -10,6 +10,8 @@ use std::rc::Rc;
 
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
+use kestrel_net::ConnectConfig;
+use kestrel_session::SessionConfig;
 use kestrel_ui::event::{AppEvent, BufferId, Line, LineKind, SERVER_BUFFER, UiCommand};
 use tokio::sync::mpsc;
 
@@ -512,6 +514,14 @@ impl Window {
             format!("/topic {topic}")
         });
 
+        // Captured rather than looked up: the window this action lives on may
+        // well be closed by the time a second connection is wanted, and the
+        // application outlives all of its windows.
+        let application = app.clone();
+        let action = gio::SimpleAction::new("connect", None);
+        action.connect_activate(move |_, _| crate::connect::show(&application));
+        window.add_action(&action);
+
         self.add_action(window, "names", |ui| ui.run("/names"));
         self.add_action(window, "part", |ui| ui.run("/part"));
         self.add_action(window, "disconnect", Self::quit);
@@ -530,6 +540,7 @@ impl Window {
         }
 
         for (action, keys) in [
+            ("win.connect", "<Ctrl>n"),
             ("win.join", "<Ctrl>j"),
             ("win.query", "<Ctrl>q"),
             ("win.part", "<Ctrl>w"),
@@ -705,12 +716,36 @@ impl Window {
     }
 }
 
+/// Open a connection and a window onto it.
+///
+/// Called once at startup and again for every later connection, so a second
+/// server is a second window in the same process rather than a second copy of
+/// the program.
+pub fn open(
+    app: &gtk::Application,
+    connect: ConnectConfig,
+    session: SessionConfig,
+) -> anyhow::Result<()> {
+    let (commands, events) = kestrel_ui::connection::start(connect, session)?;
+    let (ui, window) = Window::build(app, commands);
+    pump(ui.clone(), events);
+
+    // Leaving properly rather than dropping the socket, so the server and
+    // everyone in the channel see a reason rather than a timeout.
+    window.connect_close_request(move |_| {
+        ui.quit();
+        glib::Propagation::Proceed
+    });
+    Ok(())
+}
+
 /// Every action the menu may refer to.
 ///
 /// Named in one place so a menu entry pointing at an action nobody installed
 /// cannot slip through: GTK renders such an entry greyed out and says nothing,
 /// which looks exactly like a feature that is merely unavailable.
-const ACTIONS: [&str; 11] = [
+const ACTIONS: [&str; 12] = [
+    "connect",
     "join",
     "query",
     "nick",
@@ -730,6 +765,7 @@ const ACTIONS: [&str; 11] = [
 /// but nothing in a text box tells a new user that any of this exists.
 fn menu_model() -> gio::Menu {
     let server = gio::Menu::new();
+    server.append(Some("New Connection…"), Some("win.connect"));
     server.append(Some("Join Channel…"), Some("win.join"));
     server.append(Some("Open Conversation…"), Some("win.query"));
     server.append(Some("Change Nickname…"), Some("win.nick"));

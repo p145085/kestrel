@@ -9,6 +9,7 @@ pub mod peer;
 use std::sync::Once;
 
 use gstreamer as gst;
+use tracing::debug;
 
 pub use peer::{ConnectionState, IceState, PeerConnection, PeerEvent, Sending, Source, cameras};
 
@@ -40,8 +41,38 @@ pub fn init() -> Result<(), MediaError> {
     let mut result = Ok(());
     INIT.call_once(|| {
         result = gst::init().map_err(|error| MediaError::Init(error.to_string()));
+        if result.is_ok() {
+            add_bundled_plugins();
+        }
     });
     result
+}
+
+/// Add the plugins shipped beside the program, if there are any.
+///
+/// A bundled copy runs on machines with no GStreamer installed, where the
+/// built-in search paths lead nowhere. Done through the registry rather than
+/// by setting `GST_PLUGIN_PATH`, because changing the environment of a running
+/// process is unsound once any other thread exists -- and this crate forbids
+/// the `unsafe` that would take.
+fn add_bundled_plugins() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let Some(beside) = exe.parent() else {
+        return;
+    };
+
+    let plugins = beside.join("lib").join("gstreamer-1.0");
+    if !plugins.is_dir() {
+        // The ordinary case during development: GStreamer is installed, and
+        // its own search paths are the right ones.
+        return;
+    }
+
+    if gst::Registry::get().scan_path(&plugins) {
+        debug!("added the plugins beside the program");
+    }
 }
 
 /// Whether every element a call needs is present.

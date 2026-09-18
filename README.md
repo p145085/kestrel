@@ -49,8 +49,9 @@ something you would daily-drive.
 - [x] `kestrel-net` — the client transport, plaintext and TLS
 - [x] `kestrel-cli` — a terminal client. **Works today**
 - [~] `kestrel-ui` — the GTK client. **Connects, joins and chats**, with a
-      menu bar, buffer list, member list and topic. The Call menu is
-      present but its entries are disabled: calls are not wired in yet
+      connection dialog, menu bar, buffer list, member list and topic. The
+      Call menu is present but disabled: calls are not wired into it yet
+- [x] `xtask bundle` — a folder that runs without GStreamer or GTK installed
 - [x] `kestrel-call` — the call state machine: consent, key exchange, mesh
 - [x] `kestrel-crypto` — identity, sealed payloads, short authentication strings
 - [x] `kestrel-rtc-proto` — compact session descriptions and signalling frames
@@ -74,13 +75,42 @@ The winget package bundles GStreamer, the WebRTC plugins, GTK4 and
 `gtk4paintablesink`, so no separate GTK build is needed. On Debian or Ubuntu
 the equivalent packages are listed in `.github/workflows/ci.yml`.
 
-## Trying it
+## A runnable build
+
+```powershell
+. .\scripts\dev-env.ps1
+cargo run -p xtask -- bundle
+```
+
+That produces `dist\kestrel\`: the server, the terminal client and the
+graphical client, together with the libraries they need. It runs on a machine
+with neither GStreamer nor GTK installed, and nothing has to be on `PATH`.
+
+- `kestreld.cmd` starts the server on `127.0.0.1:6667`
+- `kestrel.cmd` starts a client — run it as many times as you want clients,
+  each with its own window, connection and nickname
+- `kestrel-ui.exe` can be double-clicked; with no arguments it asks where to
+  connect, and **Server → New Connection** opens another one in the same
+  process
+
+Only the libraries actually reachable from the programs are copied, which is
+read from their import tables rather than listed by hand, and only the twenty
+GStreamer plugins a call needs rather than the two hundred that ship. The
+bundle then runs its own client with `--check-media` and a bare environment,
+so a missing plugin fails the build instead of turning up later as a call that
+will not start.
+
+## Trying it from source
 
 ```powershell
 . .\scripts\dev-env.ps1     # required to RUN the interface, not just to build it
 cargo run -p kestreld -- kestreld.toml
 cargo run -p kestrel-ui -- 127.0.0.1:6667 --nick you -j '#test'
 ```
+
+`cargo run` rebuilds first, and Windows will not replace an executable that is
+running, so to start a second client build once and launch the binary twice
+rather than running `cargo run` again.
 
 GTK's DLLs live in the GStreamer prefix, which nothing puts on `PATH`. Without
 that first line the interface dies at startup with `STATUS_DLL_NOT_FOUND`

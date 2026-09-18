@@ -28,6 +28,7 @@ OPTIONS:
     -p, --pass <PASSWORD>    Server password
         --sasl <ACCOUNT>     Authenticate as ACCOUNT; asks for the password
         --sasl-pass <PASS>   SASL password (avoid: visible in your shell history)
+        --check-media        Report whether calls can work here, and exit
         --test-media         Use test tones instead of your microphone and camera
         --camera <name>      Use the camera whose name contains <name>
         --list-cameras       List the cameras this machine offers, and exit
@@ -64,8 +65,27 @@ struct Options {
     camera: Option<String>,
 }
 
+/// Report whether this installation can make a call.
+fn check_media() -> Result<()> {
+    kestrel_media::init().context("GStreamer would not start")?;
+
+    let missing = kestrel_media::missing_elements();
+    if missing.is_empty() {
+        println!("calls can work here ({})", kestrel_media::version());
+        return Ok(());
+    }
+    bail!("missing GStreamer elements: {}", missing.join(", "));
+}
+
 fn parse_args() -> Result<Option<Options>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Answered before anything else, because it is what a packaging step asks
+    // a freshly built bundle to find out whether it actually works.
+    if args.iter().any(|a| a == "--check-media") {
+        return check_media().map(|()| None);
+    }
+
     if args.is_empty() || args.iter().any(|a| a == "-h" || a == "--help") {
         println!("{USAGE}");
         return Ok(None);

@@ -10,10 +10,10 @@
 // otherwise go nowhere on Windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod connect;
 mod window;
 
 use anyhow::{Context, Result, bail};
-use gtk::glib;
 use gtk::prelude::*;
 use kestrel_net::ConnectConfig;
 use kestrel_session::SessionConfig;
@@ -23,7 +23,9 @@ const USAGE: &str = "\
 kestrel-ui — Kestrel's graphical IRC client
 
 USAGE:
-    kestrel-ui <host>[:<port>] [options]
+    kestrel-ui [<host>[:<port>]] [options]
+
+    With no host, a connection window is shown instead.
 
 OPTIONS:
     -n, --nick <nick>    Nickname to use
@@ -39,7 +41,8 @@ OPTIONS:
 
 /// Where the interface will connect, and as whom.
 struct Options {
-    connect: ConnectConfig,
+    /// Absent when no server was named, which is what opens the dialog.
+    connect: Option<ConnectConfig>,
     session: SessionConfig,
 }
 
@@ -54,27 +57,27 @@ fn main() -> Result<()> {
         return Ok(());
     };
 
-    // Unbounded from the interface, because `send` on one never blocks and so
-    // is safe to call straight from a GTK signal handler.
-    let (events_tx, events_rx) = async_channel::unbounded();
-    let commands = kestrel_ui::connection::spawn(options.connect, options.session, events_tx)?;
-
     let app = gtk::Application::builder()
         .application_id("chat.kestrel.Client")
         // Arguments are ours, not GTK's, and it would otherwise refuse them.
         .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
         .build();
 
-    app.connect_activate(move |app| {
-        let (ui, window) = window::Window::build(app, commands.clone());
-        window::pump(ui.clone(), events_rx.clone());
-
-        // Leaving properly rather than dropping the socket, so the server and
-        // everyone in the channel see a reason rather than a timeout.
-        window.connect_close_request(move |_| {
-            ui.quit();
-            glib::Propagation::Proceed
-        });
+    // Taken on the first activation: a connection is opened once, and what
+    // follows is opened from the window's own menu.
+    let options = std::cell::RefCell::new(Some(options));
+    app.connect_activate(move |app| match options.borrow_mut().take() {
+        // Told where to go, so go there.
+        Some(Options {
+            connect: Some(connect),
+            session,
+        }) => {
+            if let Err(error) = window::open(app, connect, session) {
+                eprintln!("could not start: {error:#}");
+            }
+        }
+        // Nothing on the command line, so ask.
+        Some(Options { connect: None, .. }) | None => connect::show(app),
     });
 
     // Emptied deliberately: GTK would otherwise try to parse our arguments and
@@ -85,7 +88,7 @@ fn main() -> Result<()> {
 
 fn parse_args() -> Result<Option<Options>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.is_empty() || args.iter().any(|a| a == "-h" || a == "--help") {
+    if args.iter().any(|a| a == "-h" || a == "--help") {
         println!("{USAGE}");
         return Ok(None);
     }
@@ -134,15 +137,16 @@ fn parse_args() -> Result<Option<Options>> {
         index += 1;
     }
 
-    let host = host.context("a server to connect to is required")?;
-    let port = port.unwrap_or(if tls { 6697 } else { 6667 });
-
-    let mut connect = if tls {
-        ConnectConfig::tls(host, port)
-    } else {
-        ConnectConfig::plain(host, port)
-    };
-    connect.danger_accept_invalid_certs = insecure;
+    let connect = host.map(|host| {
+        let port = port.unwrap_or(if tls { 6697 } else { 6667 });
+        let mut connect = if tls {
+            ConnectConfig::tls(host, port)
+        } else {
+            ConnectConfig::plain(host, port)
+        };
+        connect.danger_accept_invalid_certs = insecure;
+        connect
+    });
 
     let nick = nick.unwrap_or_else(|| "kestrel".to_owned());
     let mut session = SessionConfig::new(nick.clone());

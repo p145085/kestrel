@@ -13,6 +13,7 @@ members = [
     "crates/kestreld-core",
     "crates/kestreld-services",
     "crates/kestreld",
+    "xtask",
 ]
 
 [workspace.package]
