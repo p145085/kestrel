@@ -53,7 +53,15 @@ jobs:
       - name: Install GStreamer
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev             libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base             gstreamer1.0-plugins-good gstreamer1.0-plugins-bad             gstreamer1.0-nice gstreamer1.0-libav
+          sudo apt-get install -y --no-install-recommends \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-nice \
+            gstreamer1.0-libav
       - run: cargo test -p kestrel-media
       - run: cargo clippy -p kestrel-media --all-targets
 
