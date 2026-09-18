@@ -1,0 +1,22 @@
+[package]
+name = "kestrel-net"
+description = "Tokio transport driving a Kestrel IRC client session."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+kestrel-proto.workspace = true
+kestrel-session.workspace = true
+tokio = { workspace = true, features = ["rt", "net", "io-util", "sync", "time", "macros"] }
+tokio-rustls.workspace = true
+webpki-roots.workspace = true
+rustls.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

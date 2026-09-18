@@ -43,10 +43,11 @@ Early development. Nothing is usable yet.
 - [x] `kestreld-services` — accounts, Argon2 password storage, SASL PLAIN and EXTERNAL
 - [~] `kestreld` — the server binary. Runs over plain TCP; **no TLS yet**, and
       nothing is persisted across restarts
-- [~] `kestrel-session` — the client's sans-io session: capability
+- [x] `kestrel-session` — the client's sans-io session: capability
       negotiation, SASL, and tracked channel and member state
-- [ ] `kestrel-net` — the client transport
-- [ ] `kestrel` — the client
+- [x] `kestrel-net` — the client transport, plaintext and TLS
+- [x] `kestrel-cli` — a terminal client. **Works today**
+- [ ] `kestrel-ui` — the GTK client
 - [ ] Calls
 
 **The server works.** You can point HexChat, WeeChat or irssi at it today and
@@ -62,6 +63,17 @@ cargo run -p kestreld -- kestreld.example.toml
 
 Then connect a client to `127.0.0.1:6667`. `kestreld --print-config` prints a
 default configuration file to start from.
+
+## Running the terminal client
+
+```sh
+cargo run -p kestrel-cli -- 127.0.0.1:6667 --nick yourname --join '#test'
+```
+
+`--tls` connects over TLS, `--sasl <account>` authenticates, and `kestrel
+--help` lists the rest. Once connected, `/join`, `/msg`, `/me`, `/topic`,
+`/names`, `/whois` and `/raw` work as you would expect; anything else you type
+goes to the channel you are looking at.
 
 ## Building
 

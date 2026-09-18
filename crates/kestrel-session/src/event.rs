@@ -167,6 +167,16 @@ pub enum Event {
         /// Who set it, when the server said.
         setter: Option<Vec<u8>>,
     },
+    /// A names listing completed, carrying the whole roster.
+    ///
+    /// Emitted only at the end of a listing, where a client has asked for the
+    /// membership and wants it in one piece.
+    Names {
+        /// The channel.
+        channel: Vec<u8>,
+        /// Members in display order, each with its highest prefix.
+        members: Vec<Vec<u8>>,
+    },
     /// A channel's member list changed.
     ///
     /// Carries no roster: the session holds it, and copying it into every

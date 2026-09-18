@@ -206,6 +206,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "kestrel-cli"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "kestrel-net",
+ "kestrel-proto",
+ "kestrel-session",
+ "tokio",
+]
+
+[[package]]
+name = "kestrel-net"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "kestrel-proto",
+ "kestrel-session",
+ "rustls",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "webpki-roots",
+]
+
+[[package]]
 name = "kestrel-proto"
 version = "0.0.1"
 dependencies = [
@@ -871,6 +896,15 @@ name = "wasi"
 version = "0.11.1+wasi-snapshot-preview1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
+dependencies = [
+ "rustls-pki-types",
+]
 
 [[package]]
 name = "windows-link"

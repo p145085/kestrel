@@ -355,6 +355,7 @@ impl Session {
 
     // --- registration numerics --------------------------------------------
 
+    #[allow(clippy::too_many_lines)]
     fn handle_numeric(&mut self, code: u16, msg: &Message<'_>, out: &mut Outcome) {
         match code {
             numeric::RPL_WELCOME => {
@@ -408,10 +409,22 @@ impl Session {
             numeric::RPL_ENDOFNAMES => {
                 if let Some(name) = msg.param(1) {
                     let name = name.to_vec();
-                    if let Some(channel) = self.channels.get_mut(&self.support.fold(&name)) {
+                    let folded = self.support.fold(&name);
+                    if let Some(channel) = self.channels.get_mut(&folded) {
                         channel.commit_names(&self.support);
-                        out.emit(Event::RosterChanged { channel: name });
                     }
+                    if let Some(channel) = self.channels.get(&folded) {
+                        let members = channel
+                            .sorted_members(&self.support)
+                            .iter()
+                            .map(|m| m.display())
+                            .collect();
+                        out.emit(Event::Names {
+                            channel: name.clone(),
+                            members,
+                        });
+                    }
+                    out.emit(Event::RosterChanged { channel: name });
                 }
             }
             numeric::RPL_TOPIC => {

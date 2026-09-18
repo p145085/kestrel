@@ -1,0 +1,23 @@
+[package]
+name = "kestrel-cli"
+description = "A terminal IRC client built on the Kestrel session."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "kestrel"
+path = "src/main.rs"
+
+[dependencies]
+kestrel-proto.workspace = true
+kestrel-session.workspace = true
+kestrel-net.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "io-std", "io-util", "sync", "macros", "signal"] }
+anyhow.workspace = true
+
+[lints]
+workspace = true
