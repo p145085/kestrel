@@ -1,8 +1,11 @@
 //! Input handling and terminal decoration.
 
 use anyhow::{Result, bail};
+use kestrel_call::Privacy;
 use kestrel_net::Handle;
 use kestrel_proto::MessageBuf;
+
+use crate::calls::Calls;
 
 /// ANSI colours, kept here so the rest of the client reads as plain text.
 pub mod colour {
@@ -85,7 +88,12 @@ pub fn prompt_password(prompt: &str) -> Result<String> {
 
 /// Act on one line the user typed.
 #[allow(clippy::too_many_lines)]
-pub fn handle_input(line: &str, handle: &Handle, state: &mut State) -> Result<()> {
+pub fn handle_input(
+    line: &str,
+    handle: &Handle,
+    state: &mut State,
+    calls: &mut Calls,
+) -> Result<()> {
     let line = line.trim_end_matches(['\r', '\n']);
     if line.is_empty() {
         return Ok(());
@@ -221,6 +229,29 @@ pub fn handle_input(line: &str, handle: &Handle, state: &mut State) -> Result<()
                 bail!("usage: /raw <protocol line>");
             }
             handle.send_raw(argument)?;
+        }
+        "call" => {
+            let target = if argument.is_empty() {
+                state.target.clone().unwrap_or_default()
+            } else {
+                argument.to_owned()
+            };
+            if target.is_empty() {
+                bail!("usage: /call <nick or #channel>");
+            }
+            calls.start(handle, &target)?;
+        }
+        "answer" => calls.answer(handle)?,
+        "reject" => calls.reject(handle)?,
+        "hangup" => calls.hang_up(handle)?,
+        "verify" => calls.verify()?,
+        "relayonly" => {
+            let on = !matches!(argument, "off" | "no" | "false");
+            calls.set_privacy(if on {
+                Privacy::RelayOnly
+            } else {
+                Privacy::Direct
+            });
         }
         "quit" => {
             let reason = if argument.is_empty() {

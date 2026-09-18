@@ -210,6 +210,34 @@ pub enum Event {
         /// Who invited us.
         by: Sender,
     },
+    /// A `FAIL`, `WARN` or `NOTE` from the server.
+    ///
+    /// These carry the reason a command was refused. A client that drops them
+    /// leaves the user watching nothing happen with no idea why.
+    StandardReply {
+        /// `FAIL`, `WARN` or `NOTE`.
+        severity: Vec<u8>,
+        /// The command it concerns.
+        command: Vec<u8>,
+        /// A machine-readable code.
+        code: Vec<u8>,
+        /// Human-readable text.
+        text: Vec<u8>,
+    },
+    /// A `CALL` message from the server or a peer.
+    ///
+    /// Passed through rather than interpreted: what a call means is the call
+    /// state machine's business, and the session has no opinion about it.
+    Call {
+        /// The call this concerns, or `*` for a listing terminator.
+        call_id: Vec<u8>,
+        /// `STARTED`, `JOINED`, `INVITE`, `SIGNAL`, `LEFT` and so on.
+        verb: Vec<u8>,
+        /// Who sent it.
+        from: Sender,
+        /// Everything after the verb.
+        params: Vec<Vec<u8>>,
+    },
     /// A numeric reply the session did not consume itself.
     ///
     /// Everything from `WHOIS` output to error replies arrives here, so a

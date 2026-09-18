@@ -166,13 +166,35 @@ fn show_session(event: &Event, state: &mut State) {
                 &format!("mode {} {extra} by {}", text(spec), text(&by.nick)),
             );
         }
+        Event::StandardReply {
+            severity,
+            command,
+            code,
+            text,
+        } => {
+            let detail = if code.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", text_of(code))
+            };
+            let line = format!("{}{detail}: {}", text_of(command), text_of(text));
+            if severity == b"FAIL" {
+                warn(&line);
+            } else {
+                status(&line);
+            }
+        }
         Event::Numeric { code, params, .. } => show_numeric(*code, params),
         Event::Ended(Ended::ServerError(why)) => warn(&format!("server closed: {why}")),
         Event::Ended(Ended::RegistrationFailed(why)) => warn(&format!("could not register: {why}")),
 
         // Roster churn and tag-only traffic are tracked but not printed: a
         // line for every typing notification would drown the conversation.
-        Event::RosterChanged { .. } | Event::TagMessage { .. } | Event::Raw(_) => {}
+        // CALL messages are acted on before they reach here.
+        Event::RosterChanged { .. }
+        | Event::TagMessage { .. }
+        | Event::Call { .. }
+        | Event::Raw(_) => {}
     }
 }
 
@@ -247,6 +269,11 @@ fn show_numeric(code: u16, params: &[Vec<u8>]) {
         // Anything else is noise unless someone asked for it.
         _ => {}
     }
+}
+
+/// Render bytes for a message, named so it does not shadow `text`.
+fn text_of(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 fn event_line(channel: &[u8], text: &str) {

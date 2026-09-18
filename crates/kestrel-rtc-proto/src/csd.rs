@@ -146,6 +146,16 @@ pub struct SessionDescription {
     /// Video stream identifier, when the profile carries video.
     #[serde(rename = "w")]
     pub video_ssrc: Option<u32>,
+    /// Identifier of the audio media section.
+    ///
+    /// Carried rather than invented, because an answer's sections must match
+    /// the offer's. Reconstituting SDP with different names produces a
+    /// description the other end accepts and then cannot route media through.
+    #[serde(rename = "m")]
+    pub audio_mid: String,
+    /// Identifier of the video media section.
+    #[serde(rename = "n")]
+    pub video_mid: Option<String>,
 }
 
 impl SessionDescription {
@@ -159,6 +169,33 @@ impl SessionDescription {
         profile: Profile,
         audio_ssrc: u32,
         video_ssrc: Option<u32>,
+    ) -> Self {
+        Self::with_mids(
+            fingerprint,
+            ice_ufrag,
+            ice_pwd,
+            setup,
+            profile,
+            audio_ssrc,
+            video_ssrc,
+            "0".to_owned(),
+            profile.has_video().then(|| "1".to_owned()),
+        )
+    }
+
+    /// A description with explicit media section identifiers.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_mids(
+        fingerprint: [u8; 32],
+        ice_ufrag: impl Into<String>,
+        ice_pwd: impl Into<String>,
+        setup: Setup,
+        profile: Profile,
+        audio_ssrc: u32,
+        video_ssrc: Option<u32>,
+        audio_mid: String,
+        video_mid: Option<String>,
     ) -> Self {
         Self {
             version: CSD_VERSION,
@@ -175,6 +212,8 @@ impl SessionDescription {
             } else {
                 None
             },
+            audio_mid,
+            video_mid: if profile.has_video() { video_mid } else { None },
         }
     }
 

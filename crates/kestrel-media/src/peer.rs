@@ -10,6 +10,8 @@
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_webrtc as gst_webrtc;
+use std::sync::{Arc, Mutex};
+
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -45,10 +47,18 @@ impl Sending {
 }
 
 /// Where a peer connection's media comes from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
     /// Real capture devices.
-    Devices,
+    ///
+    /// `camera` names one, matched case-insensitively against any part of the
+    /// name [`cameras`] reports. Without it the system default is used, which
+    /// on Windows is whatever the OS ranks first -- a paired phone, often
+    /// enough, which is why the caller should usually choose deliberately.
+    Devices {
+        /// Which camera, or the system default.
+        camera: Option<String>,
+    },
     /// Generated test patterns.
     ///
     /// What makes the media path testable without a camera, a microphone, or
@@ -172,12 +182,24 @@ pub enum PeerEvent {
     Error(String),
 }
 
+/// Whether a connection is still open, shared with the signal handlers.
+///
+/// Handlers run on GStreamer's own threads and add elements to a live
+/// pipeline. The owner can close the connection at the same moment, and
+/// tearing a pipeline down while another thread is adding to it corrupts the
+/// heap. Both sides take this, so one cannot run inside the other, and a
+/// handler that arrives after the close does nothing at all.
+type Gate = Arc<Mutex<bool>>;
+
 /// One connection to one peer.
 pub struct PeerConnection {
     pipeline: gst::Pipeline,
     webrtc: gst::Element,
     /// Kept so that promise callbacks can report what they produced.
     events: mpsc::UnboundedSender<PeerEvent>,
+    gate: Gate,
+    /// When the pipeline started playing.
+    opened: std::time::Instant,
 }
 
 impl std::fmt::Debug for PeerConnection {
@@ -196,7 +218,7 @@ impl PeerConnection {
     pub fn new(
         name: &str,
         sending: Sending,
-        source: Source,
+        source: &Source,
         stun: Option<&str>,
     ) -> Result<(Self, mpsc::UnboundedReceiver<PeerEvent>), MediaError> {
         let pipeline = gst::Pipeline::builder().name(name).build();
@@ -223,7 +245,8 @@ impl PeerConnection {
         }
 
         let (events, receiver) = mpsc::unbounded_channel();
-        connect_signals(&webrtc, &events);
+        let gate: Gate = Arc::new(Mutex::new(true));
+        connect_signals(&webrtc, &events, &gate);
         watch_bus(&pipeline, &events);
 
         pipeline
@@ -235,6 +258,8 @@ impl PeerConnection {
                 pipeline,
                 webrtc,
                 events,
+                gate,
+                opened: std::time::Instant::now(),
             },
             receiver,
         ))
@@ -325,9 +350,70 @@ impl PeerConnection {
 
     /// Stop the pipeline and release its devices.
     pub fn close(&self) {
+        {
+            // Taken only to mark the connection shut, never held across the
+            // teardown itself: stopping a pipeline waits for its streaming
+            // threads, and a thread blocked on this lock would never stop.
+            let mut open = match self.gate.lock() {
+                Ok(open) => open,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if !*open {
+                return;
+            }
+            *open = false;
+        }
+
+        // Down through READY rather than straight to NULL. Dropping a playing
+        // pipeline to NULL in one step releases webrtcbin's ICE sockets while
+        // its `nicesrc` threads are still pushing, which corrupts the heap if
+        // a call is torn down moments after gathering starts -- hanging up
+        // immediately after dialling does exactly that. Pausing first unlocks
+        // those threads and waits for them before anything is freed.
+        self.settle_ice();
+
         if self.pipeline.set_state(gst::State::Null).is_err() {
             warn!("pipeline did not stop cleanly");
+            return;
         }
+        // Returning before the pipeline has actually stopped leaves its
+        // threads running behind us, which is how a closed connection goes on
+        // holding a camera.
+        let _ = self.pipeline.state(gst::ClockTime::from_seconds(5));
+    }
+}
+
+impl PeerConnection {
+    /// Wait, briefly, for ICE gathering to finish.
+    ///
+    /// Releasing webrtcbin's sockets while libnice is still gathering
+    /// corrupts the heap, and hanging up moments after dialling does exactly
+    /// that. Gathering host candidates takes milliseconds; a STUN round trip
+    /// takes a few hundred. The wait is bounded because a hangup must not be
+    /// held hostage by an unreachable STUN server -- and because leaving late
+    /// is better than crashing, but not at any price.
+    fn settle_ice(&self) {
+        use gst_webrtc::WebRTCICEGatheringState as Gathering;
+
+        // webrtcbin reports gathering complete well before its ICE transport
+        // threads have settled, and tearing the pipeline down in that window
+        // corrupts the heap rather than failing cleanly. There is no property
+        // that marks the end of it, so a young connection is held open for the
+        // remainder of its first second. Only a hangup that arrives within a
+        // second of dialling waits at all; every real call is long past this.
+        const YOUNG: std::time::Duration = std::time::Duration::from_millis(1200);
+        if let Some(remaining) = YOUNG.checked_sub(self.opened.elapsed()) {
+            std::thread::sleep(remaining);
+        }
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if self.webrtc.property::<Gathering>("ice-gathering-state") != Gathering::Gathering {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        warn!("closing while ICE was still gathering");
     }
 }
 
@@ -342,7 +428,7 @@ impl Drop for PeerConnection {
 }
 
 /// Wire the signals that fire on GStreamer's streaming threads.
-fn connect_signals(webrtc: &gst::Element, events: &mpsc::UnboundedSender<PeerEvent>) {
+fn connect_signals(webrtc: &gst::Element, events: &mpsc::UnboundedSender<PeerEvent>, gate: &Gate) {
     let tx = events.clone();
     webrtc.connect("on-negotiation-needed", false, move |_| {
         let _ = tx.send(PeerEvent::NegotiationNeeded);
@@ -378,8 +464,15 @@ fn connect_signals(webrtc: &gst::Element, events: &mpsc::UnboundedSender<PeerEve
     // Incoming media arrives as a new pad. Decoding it is set up here, but the
     // work happens on GStreamer's threads, not this one.
     let tx = events.clone();
+    let gate = Arc::clone(gate);
     webrtc.connect_pad_added(move |element, pad| {
         if pad.direction() != gst::PadDirection::Src {
+            return;
+        }
+        let Ok(open) = gate.lock() else {
+            return;
+        };
+        if !*open {
             return;
         }
         let Some(pipeline) = element
@@ -388,13 +481,8 @@ fn connect_signals(webrtc: &gst::Element, events: &mpsc::UnboundedSender<PeerEve
         else {
             return;
         };
-        match attach_receiver(&pipeline, pad) {
-            Ok(kind) => {
-                let _ = tx.send(PeerEvent::RemoteTrack { kind });
-            }
-            Err(error) => {
-                let _ = tx.send(PeerEvent::Error(error.to_string()));
-            }
+        if let Err(error) = attach_receiver(&pipeline, pad, &tx, &gate) {
+            let _ = tx.send(PeerEvent::Error(error.to_string()));
         }
     });
 }
@@ -404,35 +492,59 @@ fn connect_signals(webrtc: &gst::Element, events: &mpsc::UnboundedSender<PeerEve
 /// Rendering is the UI's job: it creates the sink, because a `gdk::Paintable`
 /// cannot cross threads while a `gst::Element` can. Until one is attached, the
 /// stream still has to be consumed or the pipeline stalls.
-fn attach_receiver(pipeline: &gst::Pipeline, pad: &gst::Pad) -> Result<String, MediaError> {
-    let decode = gst::ElementFactory::make("decodebin3")
+fn attach_receiver(
+    pipeline: &gst::Pipeline,
+    pad: &gst::Pad,
+    events: &mpsc::UnboundedSender<PeerEvent>,
+    gate: &Gate,
+) -> Result<(), MediaError> {
+    // Plain `decodebin`, deliberately. The pad carries `application/x-rtp`,
+    // and `decodebin3` does not autoplug RTP depayloaders: it accepts the
+    // link, never produces a source pad, and everything upstream of it
+    // eventually fails with `not-linked`, which surfaces as webrtcbin's own
+    // `nicesrc` reporting an internal data stream error.
+    let decode = gst::ElementFactory::make("decodebin")
         .build()
-        .or_else(|_| gst::ElementFactory::make("decodebin").build())
         .map_err(|_| MediaError::MissingElement("decodebin"))?;
 
-    let sink_kind = std::sync::Arc::new(std::sync::Mutex::new(String::from("unknown")));
-    let reported = std::sync::Arc::clone(&sink_kind);
-
     let pipeline_ref = pipeline.clone();
+    let tx = events.clone();
+    // Cloned rather than borrowed: this fires later, on another thread, and
+    // possibly after the owner has closed the connection.
+    let gate = Arc::clone(gate);
     decode.connect_pad_added(move |_, pad| {
-        let kind = pad
+        let Ok(open) = gate.lock() else {
+            return;
+        };
+        if !*open {
+            return;
+        }
+        let caps = pad
             .current_caps()
             .and_then(|caps| caps.structure(0).map(|s| s.name().to_string()))
             .unwrap_or_default();
-        let is_video = kind.starts_with("video");
-        if let Ok(mut slot) = reported.lock() {
-            let kind = if is_video { "video" } else { "audio" };
-            kind.clone_into(&mut slot);
-        }
+        let is_video = caps.starts_with("video");
 
-        let Ok(sink) = build_discard_sink(&pipeline_ref, is_video) else {
-            warn!("could not build a sink for {kind}");
-            return;
-        };
-        if let Some(target) = sink.static_pad("sink")
-            && pad.link(&target).is_err()
-        {
-            warn!("could not link decoded {kind}");
+        match build_discard_sink(&pipeline_ref, is_video) {
+            Ok(sink) => {
+                let linked = sink
+                    .static_pad("sink")
+                    .is_some_and(|target| pad.link(&target).is_ok());
+                if linked {
+                    // Reported from here rather than when the stream was
+                    // linked, because until decoding starts there is nothing
+                    // to name: the kind is only known once caps are.
+                    let kind = if is_video { "video" } else { "audio" };
+                    let _ = tx.send(PeerEvent::RemoteTrack {
+                        kind: kind.to_owned(),
+                    });
+                } else {
+                    warn!("could not link decoded {caps}");
+                }
+            }
+            Err(error) => {
+                let _ = tx.send(PeerEvent::Error(error.to_string()));
+            }
         }
     });
 
@@ -449,9 +561,8 @@ fn attach_receiver(pipeline: &gst::Pipeline, pad: &gst::Pad) -> Result<String, M
     pad.link(&target)
         .map_err(|_| MediaError::Pipeline("could not link the incoming stream".into()))?;
 
-    let kind = sink_kind.lock().map(|k| k.clone()).unwrap_or_default();
-    debug!("receiving {kind}");
-    Ok(kind)
+    debug!("decoding an incoming stream");
+    Ok(())
 }
 
 fn build_discard_sink(
@@ -500,7 +611,21 @@ fn watch_bus(pipeline: &gst::Pipeline, events: &mpsc::UnboundedSender<PeerEvent>
     bus.set_sync_handler(move |_, message| {
         match message.view() {
             gst::MessageView::Error(error) => {
-                let _ = tx.send(PeerEvent::Error(error.error().to_string()));
+                // Name the element and keep the detail. "Internal data stream
+                // error" on its own says nothing about which part of a
+                // dozen-element pipeline gave up.
+                let source = message.src().map_or_else(
+                    || "pipeline".to_owned(),
+                    |src| src.path_string().to_string(),
+                );
+                let detail = error
+                    .debug()
+                    .map(|d| format!(" ({d})"))
+                    .unwrap_or_default();
+                let _ = tx.send(PeerEvent::Error(format!(
+                    "{source}: {}{detail}",
+                    error.error()
+                )));
             }
             gst::MessageView::Warning(warning) => {
                 debug!("pipeline warning: {}", warning.error());
@@ -511,17 +636,106 @@ fn watch_bus(pipeline: &gst::Pipeline, events: &mpsc::UnboundedSender<PeerEvent>
     });
 }
 
+/// The cameras this machine offers, in the order the system ranks them.
+///
+/// Worth showing before opening anything: the first entry is what a default
+/// capture would take, and on Windows that can be a paired phone rather than
+/// anything plugged into the machine.
+#[must_use]
+pub fn cameras() -> Vec<String> {
+    video_devices()
+        .iter()
+        .map(|device| device.display_name().to_string())
+        .collect()
+}
+
+/// Every device the monitor considers a video source.
+///
+/// Both orderings of the class are accepted because Windows reports
+/// `Video/Source` for some backends and `Source/Video` for others, and a
+/// filter matching only one of them silently hides half the cameras.
+fn video_devices() -> Vec<gst::Device> {
+    let monitor = gst::DeviceMonitor::new();
+    if monitor.start().is_err() {
+        return Vec::new();
+    }
+    let found = monitor.devices().into_iter().filter(|device| {
+        let class = device.device_class();
+        class.contains("Video") && class.contains("Source")
+    });
+
+    // Windows offers one physical camera through more than one backend, and
+    // they are not equally good: the legacy Kernel Streaming source fails to
+    // start on hardware that Media Foundation drives perfectly well. Keep the
+    // best backend for each name, in the order the names first appeared, so
+    // the list has one entry per camera and its first entry is a real default.
+    let mut best: Vec<(u8, gst::Device)> = Vec::new();
+    for device in found {
+        let rank = backend_rank(&device);
+        let name = device.display_name();
+        match best.iter().position(|(_, kept)| kept.display_name() == name) {
+            Some(at) if rank < best[at].0 => best[at] = (rank, device),
+            Some(_) => {}
+            None => best.push((rank, device)),
+        }
+    }
+
+    monitor.stop();
+    best.into_iter().map(|(_, device)| device).collect()
+}
+
+/// How much we trust the backend behind a device. Lower is better.
+///
+/// Read from the device's own properties rather than by building its element:
+/// constructing a legacy source merely to identify it prints a deprecation
+/// warning, and this runs before every call.
+fn backend_rank(device: &gst::Device) -> u8 {
+    let api = device
+        .properties()
+        .and_then(|properties| properties.get::<String>("device.api").ok());
+    match api.as_deref() {
+        // Windows offers cameras through both Media Foundation and the older
+        // Kernel Streaming source, and the latter fails to start on hardware
+        // the former drives without complaint.
+        Some("mediafoundation") => 0,
+        // Elsewhere each camera has one backend, so everything ranks alike and
+        // the system's own ordering is left untouched.
+        _ => 1,
+    }
+}
+
+/// Build a source for whichever camera the system ranks first.
+fn first_camera() -> Option<gst::Element> {
+    let device = video_devices().into_iter().next()?;
+    debug!("opening the default camera, {}", device.display_name());
+    device.create_element(None).ok()
+}
+
+/// Build a source for the first camera whose name contains `wanted`.
+///
+/// Returns `None` when nothing matches, leaving the caller to fall back to the
+/// default rather than failing outright -- a camera that has been unplugged
+/// since it was chosen should not stop a call from happening at all.
+fn open_camera(wanted: &str) -> Option<gst::Element> {
+    let wanted = wanted.to_lowercase();
+    let device = video_devices()
+        .into_iter()
+        .find(|device| device.display_name().to_lowercase().contains(&wanted))?;
+    debug!("opening camera {}", device.display_name());
+    device.create_element(None).ok()
+}
+
 fn add_audio(
     pipeline: &gst::Pipeline,
     webrtc: &gst::Element,
-    source: Source,
+    source: &Source,
 ) -> Result<(), MediaError> {
     let src = match source {
         Source::Test => gst::ElementFactory::make("audiotestsrc")
             .property("is-live", true)
             .property_from_str("wave", "ticks")
             .build(),
-        Source::Devices => gst::ElementFactory::make("wasapi2src")
+        Source::Devices { .. } => gst::ElementFactory::make("wasapi2src")
             .property("low-latency", true)
             .build()
             .or_else(|_| gst::ElementFactory::make("autoaudiosrc").build()),
@@ -551,20 +765,60 @@ fn add_audio(
 fn add_video(
     pipeline: &gst::Pipeline,
     webrtc: &gst::Element,
-    source: Source,
+    source: &Source,
 ) -> Result<(), MediaError> {
     let src = match source {
         Source::Test => gst::ElementFactory::make("videotestsrc")
             .property("is-live", true)
             .property_from_str("pattern", "ball")
             .build(),
-        Source::Devices => gst::ElementFactory::make("mfvideosrc")
-            .build()
-            .or_else(|_| gst::ElementFactory::make("autovideosrc").build()),
+        Source::Devices { camera } => {
+            // Named or not, the camera comes from the device monitor, so what
+            // a call opens is the same list `cameras` reports and the first
+            // entry really is the default. Reaching for a bare `mfvideosrc`
+            // instead would quietly pick whatever the OS ranks first, which
+            // is not necessarily anything attached to this machine.
+            let chosen = match camera.as_deref() {
+                Some(wanted) => open_camera(wanted),
+                None => first_camera(),
+            };
+            match chosen {
+                Some(src) => Ok(src),
+                None => gst::ElementFactory::make("mfvideosrc")
+                    .build()
+                    .or_else(|_| gst::ElementFactory::make("autovideosrc").build()),
+            }
+        }
     }
     .map_err(|_| MediaError::MissingElement("video source"))?;
 
+    // Cameras advertise their best format first, and for most webcams that is
+    // MJPEG at the highest resolution they manage -- which `videoconvert`
+    // cannot accept at all, so negotiation fails and the source errors out
+    // before a single frame is sent. Asking for raw video picks the format
+    // the rest of the chain can actually use.
+    let raw = gst::ElementFactory::make("capsfilter")
+        .property("caps", gst::Caps::builder("video/x-raw").build())
+        .build()
+        .map_err(|_| MediaError::MissingElement("capsfilter"))?;
+
     let convert = make("videoconvert")?;
+    let scale = make("videoscale")?;
+
+    // A conversation, not a broadcast: 480p is what the mesh budget in the
+    // design assumes, and a software VP8 encoder keeps up with it. The frame
+    // rate is left to the camera, since not every one offers 30 here.
+    let size = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            gst::Caps::builder("video/x-raw")
+                .field("width", 640i32)
+                .field("height", 480i32)
+                .build(),
+        )
+        .build()
+        .map_err(|_| MediaError::MissingElement("capsfilter"))?;
+
     let queue = make("queue")?;
     // VP8 first: universally interoperable and no patent exposure. Realtime
     // deadline and no lag give an encoder that keeps up with a conversation
@@ -580,7 +834,7 @@ fn add_video(
         .build()
         .map_err(|_| MediaError::MissingElement("rtpvp8pay"))?;
 
-    let chain = [&src, &convert, &queue, &encode, &pay];
+    let chain = [&src, &raw, &convert, &scale, &size, &queue, &encode, &pay];
     pipeline
         .add_many(chain)
         .map_err(|_| MediaError::Pipeline("could not add the video chain".into()))?;

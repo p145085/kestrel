@@ -23,9 +23,11 @@ const OPUS_PT: u8 = 111;
 #[must_use]
 pub fn to_sdp(description: &SessionDescription) -> String {
     let fingerprint = description.fingerprint_sdp();
-    let mut mids = vec![AUDIO_MID];
+    let audio_mid = description.audio_mid.as_str();
+    let video_mid = description.video_mid.as_deref().unwrap_or(VIDEO_MID);
+    let mut mids = vec![audio_mid];
     if description.profile.has_video() {
-        mids.push(VIDEO_MID);
+        mids.push(video_mid);
     }
 
     let mut sdp = String::with_capacity(1024);
@@ -38,9 +40,9 @@ pub fn to_sdp(description: &SessionDescription) -> String {
     let _ = write!(sdp, "a=group:BUNDLE {}\r\n", mids.join(" "));
     sdp.push_str("a=msid-semantic: WMS kestrel\r\n");
 
-    push_audio(&mut sdp, description, &fingerprint);
+    push_audio(&mut sdp, description, &fingerprint, audio_mid);
     if description.profile.has_video() {
-        push_video(&mut sdp, description, &fingerprint);
+        push_video(&mut sdp, description, &fingerprint, video_mid);
     }
     sdp
 }
@@ -59,9 +61,9 @@ fn push_common(sdp: &mut String, description: &SessionDescription, fingerprint: 
     sdp.push_str("a=rtcp-mux\r\n");
 }
 
-fn push_audio(sdp: &mut String, description: &SessionDescription, fingerprint: &str) {
+fn push_audio(sdp: &mut String, description: &SessionDescription, fingerprint: &str, mid: &str) {
     let _ = write!(sdp, "m=audio 9 UDP/TLS/RTP/SAVPF {OPUS_PT}\r\n");
-    push_common(sdp, description, fingerprint, AUDIO_MID);
+    push_common(sdp, description, fingerprint, mid);
     let _ = write!(sdp, "a=rtpmap:{OPUS_PT} opus/48000/2\r\n");
     // Opus is stereo-capable and benefits from in-band FEC on a lossy link;
     // both are off unless asked for.
@@ -69,12 +71,12 @@ fn push_audio(sdp: &mut String, description: &SessionDescription, fingerprint: &
     let _ = write!(sdp, "a=ssrc:{} cname:kestrel\r\n", description.audio_ssrc);
 }
 
-fn push_video(sdp: &mut String, description: &SessionDescription, fingerprint: &str) {
+fn push_video(sdp: &mut String, description: &SessionDescription, fingerprint: &str, mid: &str) {
     let Some((codec, payload_type)) = description.profile.video_codec() else {
         return;
     };
     let _ = write!(sdp, "m=video 9 UDP/TLS/RTP/SAVPF {payload_type}\r\n");
-    push_common(sdp, description, fingerprint, VIDEO_MID);
+    push_common(sdp, description, fingerprint, mid);
     let _ = write!(sdp, "a=rtpmap:{payload_type} {codec}/90000\r\n");
     // Keyframe requests and negative acknowledgements: without them a lost
     // packet costs seconds of frozen video rather than milliseconds.
@@ -102,6 +104,8 @@ pub fn from_sdp(sdp: &str) -> Option<SessionDescription> {
     let mut has_video = false;
     let mut video_codec = None;
     let mut in_video = false;
+    let mut audio_mid = None;
+    let mut video_mid = None;
 
     for line in sdp.lines().map(str::trim) {
         if let Some(rest) = line.strip_prefix("m=") {
@@ -123,6 +127,12 @@ pub fn from_sdp(sdp: &str) -> Option<SessionDescription> {
                     .and_then(|codec| codec.split('/').next())
                     .map(str::to_ascii_uppercase);
             }
+        } else if let Some(value) = line.strip_prefix("a=mid:") {
+            if in_video {
+                video_mid.get_or_insert_with(|| value.to_owned());
+            } else {
+                audio_mid.get_or_insert_with(|| value.to_owned());
+            }
         } else if let Some(value) = line.strip_prefix("a=ssrc:") {
             let parsed = value.split_whitespace().next().and_then(|s| s.parse().ok());
             if in_video {
@@ -141,7 +151,7 @@ pub fn from_sdp(sdp: &str) -> Option<SessionDescription> {
         (true, _) => Profile::OpusVp8,
     };
 
-    Some(SessionDescription::new(
+    Some(SessionDescription::with_mids(
         fingerprint?,
         ice_ufrag?,
         ice_pwd?,
@@ -149,6 +159,8 @@ pub fn from_sdp(sdp: &str) -> Option<SessionDescription> {
         profile,
         audio_ssrc.unwrap_or(0),
         video_ssrc,
+        audio_mid.unwrap_or_else(|| AUDIO_MID.to_owned()),
+        video_mid,
     ))
 }
 
@@ -268,6 +280,29 @@ mod tests {
     fn an_unknown_video_codec_reduces_to_the_universal_profile() {
         let sdp = to_sdp(&description(Profile::OpusVp8)).replace("VP8/90000", "AV1/90000");
         assert_eq!(from_sdp(&sdp).unwrap().profile, Profile::OpusVp8);
+    }
+
+    #[test]
+    fn media_section_names_survive_the_compact_form() {
+        // An answer's sections must match the offer's. Inventing new names
+        // produces a description the far end accepts and then cannot route
+        // media through, which looks like a connected call carrying nothing.
+        let original = to_sdp(&description(Profile::OpusVp8))
+            .replace("a=mid:0", "a=mid:audio0")
+            .replace("a=mid:1", "a=mid:video1")
+            .replace("a=group:BUNDLE 0 1", "a=group:BUNDLE audio0 video1");
+
+        let compact = from_sdp(&original).expect("should reduce");
+        assert_eq!(compact.audio_mid, "audio0");
+        assert_eq!(compact.video_mid.as_deref(), Some("video1"));
+
+        let rebuilt = to_sdp(&compact);
+        assert!(rebuilt.contains("a=mid:audio0"), "got:\n{rebuilt}");
+        assert!(rebuilt.contains("a=mid:video1"), "got:\n{rebuilt}");
+        assert!(
+            rebuilt.contains("a=group:BUNDLE audio0 video1"),
+            "the bundle group must name the same sections:\n{rebuilt}"
+        );
     }
 
     #[test]

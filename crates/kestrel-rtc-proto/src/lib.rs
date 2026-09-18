@@ -9,4 +9,6 @@ pub mod frame;
 pub mod sdp;
 
 pub use csd::{Candidate, CandidateKind, Profile, SessionDescription, Setup};
-pub use frame::{Frame, FrameError, MediaWanted, binding_context, open, seal};
+pub use frame::{
+    Frame, FrameError, MediaWanted, binding_context, decode_plain, encode_plain, open, seal,
+};

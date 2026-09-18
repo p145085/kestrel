@@ -4,11 +4,13 @@
 //! exercise `kestrel-session` against a real server, and every behaviour it
 //! shows is the same code the graphical client will use.
 
+mod calls;
 mod render;
 mod ui;
 
 use anyhow::{Context, Result, bail};
 use kestrel_net::{ClientEvent, ConnectConfig};
+use kestrel_session::Event;
 use kestrel_session::{Sasl, SessionConfig};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
@@ -26,6 +28,10 @@ OPTIONS:
     -p, --pass <PASSWORD>    Server password
         --sasl <ACCOUNT>     Authenticate as ACCOUNT; asks for the password
         --sasl-pass <PASS>   SASL password (avoid: visible in your shell history)
+        --test-media         Use test tones instead of your microphone and camera
+        --camera <name>      Use the camera whose name contains <name>
+        --list-cameras       List the cameras this machine offers, and exit
+        --audio-only         Do not offer video
         --tls                Connect with TLS (default port 6697)
         --insecure           With --tls, skip certificate checking
     -h, --help               Show this
@@ -38,19 +44,41 @@ COMMANDS once connected:
     /t <target>              Switch where plain text goes
     /raw <line>              Send a raw protocol line
     /quit [reason]
-    Anything else is sent to the current target.";
+    Anything else is sent to the current target.
+
+CALLS:
+    /call <nick|#chan>       Place a call
+    /answer                  Answer a ringing call
+    /reject                  Refuse it
+    /hangup                  Leave the call
+    /verify                  Confirm the spoken phrase matched
+    /relayonly [on|off]      Hide your IP address from peers (needs a relay)";
 
 /// Options gathered from the command line.
 struct Options {
     connect: ConnectConfig,
     session: SessionConfig,
     join: Vec<String>,
+    test_media: bool,
+    audio_only: bool,
+    camera: Option<String>,
 }
 
 fn parse_args() -> Result<Option<Options>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() || args.iter().any(|a| a == "-h" || a == "--help") {
         println!("{USAGE}");
+        return Ok(None);
+    }
+
+    if args.iter().any(|a| a == "--list-cameras") {
+        kestrel_media::init().context("GStreamer would not start")?;
+        // In the order the system ranks them, because the first is what a
+        // call takes when no camera is named.
+        for (position, name) in kestrel_media::cameras().iter().enumerate() {
+            let note = if position == 0 { "  (default)" } else { "" };
+            println!("{name}{note}");
+        }
         return Ok(None);
     }
 
@@ -64,6 +92,9 @@ fn parse_args() -> Result<Option<Options>> {
     let mut server_password = None;
     let mut sasl_account = None;
     let mut sasl_password = None;
+    let mut test_media = false;
+    let mut camera = None;
+    let mut audio_only = false;
 
     let mut index = 0;
     while index < args.len() {
@@ -77,6 +108,9 @@ fn parse_args() -> Result<Option<Options>> {
         match arg.as_str() {
             "--tls" => tls = true,
             "--insecure" => insecure = true,
+            "--test-media" => test_media = true,
+            "--camera" => camera = Some(next("--camera")?),
+            "--audio-only" => audio_only = true,
             "-n" | "--nick" => nick = Some(next("--nick")?),
             "-r" | "--real" => realname = Some(next("--real")?),
             "-j" | "--join" => join = next("--join")?.split(',').map(str::to_owned).collect(),
@@ -134,6 +168,9 @@ fn parse_args() -> Result<Option<Options>> {
         connect,
         session,
         join,
+        test_media,
+        audio_only,
+        camera,
     }))
 }
 
@@ -171,6 +208,23 @@ async fn main() -> Result<()> {
 
     let mut state = ui::State::new(options.join.first().cloned());
 
+    // Media runs on GStreamer's own threads; everything it reports is funnelled
+    // here so that calls are driven from the same loop as everything else.
+    let (media_tx, mut media_rx) = mpsc::unbounded_channel();
+    if let Err(error) = kestrel_media::init() {
+        ui::warn(&format!("calls are unavailable: {error}"));
+    }
+    let mut calls = calls::Calls::new(media_tx);
+    if options.test_media {
+        calls.use_test_media();
+    }
+    if let Some(camera) = options.camera {
+        calls.use_camera(camera);
+    }
+    if options.audio_only {
+        calls.audio_only();
+    }
+
     loop {
         tokio::select! {
             event = events.recv() => {
@@ -179,13 +233,39 @@ async fn main() -> Result<()> {
                     ui::status(&format!("disconnected: {reason}"));
                     break;
                 }
+                // Calls are handled before rendering, so a ringing call is
+                // acted on rather than merely printed.
+                if let ClientEvent::Session(session_event) = &event {
+                    match session_event {
+                        Event::Call { call_id, verb, from, params } => {
+                            if let Err(error) = calls.on_call_message(
+                                &handle, call_id, verb, &from.nick, params,
+                            ) {
+                                ui::warn(&error.to_string());
+                            }
+                        }
+                        Event::LoggedIn { account } => {
+                            calls.set_account(Some(String::from_utf8_lossy(account).into_owned()));
+                        }
+                        Event::Registered { nick } => {
+                            calls.set_nick(String::from_utf8_lossy(nick).into_owned());
+                        }
+                        Event::NickChanged { new, is_self: true, .. } => {
+                            calls.set_nick(String::from_utf8_lossy(new).into_owned());
+                        }
+                        _ => {}
+                    }
+                }
+
                 let was_registered = state.registered;
                 render::show(&event, &mut state);
                 // Anything typed while connecting runs now, in the order it
                 // was typed.
                 if state.registered && !was_registered {
                     for line in state.take_pending() {
-                        if let Err(error) = ui::handle_input(&line, &handle, &mut state) {
+                        if let Err(error) =
+                            ui::handle_input(&line, &handle, &mut state, &mut calls)
+                        {
                             ui::warn(&error.to_string());
                         }
                     }
@@ -197,11 +277,18 @@ async fn main() -> Result<()> {
                     continue;
                 };
                 if state.registered {
-                    if let Err(error) = ui::handle_input(&line, &handle, &mut state) {
+                    if let Err(error) =
+                        ui::handle_input(&line, &handle, &mut state, &mut calls)
+                    {
                         ui::warn(&error.to_string());
                     }
                 } else {
                     state.defer(&line);
+                }
+            }
+            Some(media) = media_rx.recv() => {
+                if let Err(error) = calls.on_media(&handle, media) {
+                    ui::warn(&error.to_string());
                 }
             }
             () = wait_for_interrupt() => {

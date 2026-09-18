@@ -16,6 +16,10 @@ path = "src/main.rs"
 kestrel-proto.workspace = true
 kestrel-session.workspace = true
 kestrel-net.workspace = true
+kestrel-call.workspace = true
+kestrel-crypto.workspace = true
+kestrel-media.workspace = true
+kestrel-rtc-proto.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "io-std", "io-util", "sync", "macros", "signal"] }
 anyhow.workspace = true
 

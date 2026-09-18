@@ -207,6 +207,10 @@ impl Session {
             b"AWAY" => self.handle_away(msg, &mut out),
             b"ACCOUNT" => self.handle_account(msg, &mut out),
             b"INVITE" => Self::handle_invite(msg, &mut out),
+            b"CALL" => Self::handle_call(msg, &mut out),
+            b"FAIL" | b"WARN" | b"NOTE" => {
+                Self::handle_standard_reply(&command, msg, &mut out);
+            }
             _ => {
                 if let Some(code) = msg.numeric() {
                     self.handle_numeric(code, msg, &mut out);
@@ -812,6 +816,40 @@ impl Session {
         out.emit(Event::Invited {
             channel: channel.to_vec(),
             by: Self::sender_of(msg),
+        });
+    }
+
+    fn handle_standard_reply(severity: &[u8], msg: &Message<'_>, out: &mut Outcome) {
+        // <severity> <command> [code] [context...] :<description>
+        let Some(command) = msg.param(0) else {
+            return;
+        };
+        let text = msg.params().last().copied().unwrap_or(b"");
+        // The code is only a code when there is something after it; with two
+        // parameters the second is the description.
+        let code = if msg.params().len() > 2 {
+            msg.param(1).unwrap_or(b"")
+        } else {
+            b""
+        };
+        out.emit(Event::StandardReply {
+            severity: severity.to_vec(),
+            command: command.to_vec(),
+            code: code.to_vec(),
+            text: text.to_vec(),
+        });
+    }
+
+    fn handle_call(msg: &Message<'_>, out: &mut Outcome) {
+        // CALL <call-id> <verb> [params...]
+        let (Some(call_id), Some(verb)) = (msg.param(0), msg.param(1)) else {
+            return;
+        };
+        out.emit(Event::Call {
+            call_id: call_id.to_vec(),
+            verb: verb.to_ascii_uppercase(),
+            from: Self::sender_of(msg),
+            params: msg.params().iter().skip(2).map(|p| (*p).to_vec()).collect(),
         });
     }
 

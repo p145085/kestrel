@@ -17,6 +17,7 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+kestrel-rtc-proto.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }
 
 [lints]

@@ -74,6 +74,8 @@ pub const DEFAULT_CAPS: &[&str] = &[
     "setname",
     "standard-replies",
     "userhost-in-names",
+    // Calls. Servers that do not carry them simply will not offer it.
+    "kestrel.chat/rtc",
 ];
 
 impl SessionConfig {

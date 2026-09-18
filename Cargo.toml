@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/kestrel-call",
     "crates/kestrel-crypto",
     "crates/kestrel-media",
     "crates/kestrel-proto",
@@ -22,10 +23,12 @@ repository = "https://github.com/p145085/kestrel"
 authors = ["Kestrel contributors"]
 
 [workspace.dependencies]
+kestrel-call = { path = "crates/kestrel-call" }
 kestrel-crypto = { path = "crates/kestrel-crypto" }
 kestrel-proto = { path = "crates/kestrel-proto" }
 kestrel-rtc-proto = { path = "crates/kestrel-rtc-proto" }
 kestrel-session = { path = "crates/kestrel-session" }
+kestrel-media = { path = "crates/kestrel-media" }
 kestrel-net = { path = "crates/kestrel-net" }
 kestreld-core = { path = "crates/kestreld-core" }
 kestreld-services = { path = "crates/kestreld-services" }

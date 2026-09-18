@@ -24,9 +24,9 @@ async fn connect_pair(sending: Sending) -> (PeerConnection, PeerConnection) {
     kestrel_media::init().expect("GStreamer should initialise");
 
     let (alice, mut alice_events) =
-        PeerConnection::new("alice", sending, Source::Test, None).expect("alice should build");
+        PeerConnection::new("alice", sending, &Source::Test, None).expect("alice should build");
     let (bob, mut bob_events) =
-        PeerConnection::new("bob", sending, Source::Test, None).expect("bob should build");
+        PeerConnection::new("bob", sending, &Source::Test, None).expect("bob should build");
 
     let mut alice_connected = false;
     let mut bob_connected = false;
@@ -143,9 +143,9 @@ async fn a_remote_track_is_reported_before_media_arrives() {
     kestrel_media::init().expect("GStreamer should initialise");
 
     let (alice, mut alice_events) =
-        PeerConnection::new("alice", Sending::audio_only(), Source::Test, None).unwrap();
+        PeerConnection::new("alice", Sending::audio_only(), &Source::Test, None).unwrap();
     let (bob, mut bob_events) =
-        PeerConnection::new("bob", Sending::audio_only(), Source::Test, None).unwrap();
+        PeerConnection::new("bob", Sending::audio_only(), &Source::Test, None).unwrap();
 
     let mut saw_track = false;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
@@ -179,7 +179,7 @@ fn a_connection_releases_its_devices_when_dropped() {
     // notice immediately and rightly distrust.
     kestrel_media::init().expect("GStreamer should initialise");
     let (peer, _events) =
-        PeerConnection::new("dropped", Sending::audio_only(), Source::Test, None).unwrap();
+        PeerConnection::new("dropped", Sending::audio_only(), &Source::Test, None).unwrap();
     drop(peer);
 }
 

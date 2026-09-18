@@ -98,6 +98,9 @@ pub enum FrameError {
     /// The plaintext was not a frame.
     #[error("frame is malformed")]
     MalformedFrame,
+    /// A frame that must be sealed was handled in the clear.
+    #[error("this frame must be sealed")]
+    MustBeSealed,
     /// The frame was larger than the transport permits.
     #[error("frame is larger than {max} bytes")]
     TooLarge {
@@ -160,6 +163,45 @@ pub fn open(payload: &str, keys: &mut SealingKeys, context: &[u8]) -> Result<Fra
     ciborium::from_reader(plaintext.as_slice()).map_err(|_| FrameError::MalformedFrame)
 }
 
+/// Encode a frame without sealing it.
+///
+/// Only for the two frames that carry the key exchange itself: there is no
+/// shared secret yet, so there is nothing to seal with. Both are safe in the
+/// clear because neither carries a fingerprint, a candidate or anything else
+/// private — an invitation discloses only that somebody is calling, which the
+/// server routing it knows anyway. Everything after is sealed.
+pub fn encode_plain(frame: &Frame) -> Result<String, FrameError> {
+    match frame {
+        Frame::Invite { .. } | Frame::Accept { .. } => {}
+        _ => return Err(FrameError::MustBeSealed),
+    }
+    let mut encoded = Vec::new();
+    ciborium::into_writer(frame, &mut encoded).map_err(|_| FrameError::MalformedFrame)?;
+    let text = BASE64.encode(&encoded);
+    if text.len() > MAX_ENVELOPE {
+        return Err(FrameError::TooLarge { max: MAX_ENVELOPE });
+    }
+    Ok(text)
+}
+
+/// Decode an unsealed frame.
+///
+/// Refuses anything that should have been sealed, so a peer cannot downgrade a
+/// description or a candidate batch into the clear simply by sending it that
+/// way.
+pub fn decode_plain(payload: &str) -> Result<Frame, FrameError> {
+    if payload.len() > MAX_ENVELOPE {
+        return Err(FrameError::TooLarge { max: MAX_ENVELOPE });
+    }
+    let encoded = BASE64.decode(payload).map_err(|_| FrameError::NotBase64)?;
+    let frame: Frame =
+        ciborium::from_reader(encoded.as_slice()).map_err(|_| FrameError::MalformedFrame)?;
+    match frame {
+        Frame::Invite { .. } | Frame::Accept { .. } => Ok(frame),
+        _ => Err(FrameError::MustBeSealed),
+    }
+}
+
 /// The bytes an invitation or acceptance is signed over.
 ///
 /// Binding the call, both parties and the ephemeral key together is what stops
@@ -186,8 +228,10 @@ pub fn binding_context(
 
 #[cfg(test)]
 mod tests {
-    use super::{Frame, FrameError, MediaWanted, binding_context, open, seal};
+    use base64::Engine as _;
     use kestrel_crypto::{EphemeralKey, Identity, SealingKeys};
+
+    use super::{Frame, FrameError, MediaWanted, binding_context, open, seal};
 
     use crate::csd::{Candidate, CandidateKind, Profile, SessionDescription, Setup};
 
@@ -296,9 +340,22 @@ mod tests {
     #[test]
     fn a_tampered_envelope_does_not_open() {
         let (mut alice, mut bob) = agreed();
-        let mut payload = seal(&description_frame(), &mut alice, b"ctx").unwrap();
-        payload.pop();
-        payload.push(if payload.ends_with('A') { 'B' } else { 'A' });
+        let sealed = seal(&description_frame(), &mut alice, b"ctx").unwrap();
+
+        // Changed in the middle rather than at the end. The last base64
+        // character carries padding bits, so several values there decode to
+        // the same bytes -- tampering only with it would be undone by the
+        // decoder, and the test would pass or fail depending on the nonce.
+        let middle = sealed.len() / 2;
+        let mut payload = sealed.clone();
+        let replacement = if sealed.as_bytes()[middle] == b'A' {
+            "B"
+        } else {
+            "A"
+        };
+        payload.replace_range(middle..=middle, replacement);
+        assert_ne!(payload, sealed, "the envelope was not actually changed");
+
         assert!(open(&payload, &mut bob, b"ctx").is_err());
     }
 
@@ -345,6 +402,34 @@ mod tests {
     }
 
     // --- binding ----------------------------------------------------------
+
+    #[test]
+    fn the_key_exchange_frames_travel_in_the_clear() {
+        let identity = Identity::generate();
+        let invite = Frame::Invite {
+            identity: identity.public(),
+            ephemeral: [1; 32],
+            media: MediaWanted::audio_video(),
+            signature: [2; 64],
+        };
+        let encoded = super::encode_plain(&invite).unwrap();
+        assert_eq!(super::decode_plain(&encoded).unwrap(), invite);
+    }
+
+    #[test]
+    fn nothing_else_may_travel_in_the_clear() {
+        // Otherwise a peer could downgrade a description out of its seal
+        // simply by sending it unsealed.
+        assert_eq!(
+            super::encode_plain(&description_frame()),
+            Err(FrameError::MustBeSealed)
+        );
+
+        let mut encoded = Vec::new();
+        ciborium::into_writer(&description_frame(), &mut encoded).unwrap();
+        let smuggled = super::BASE64.encode(&encoded);
+        assert_eq!(super::decode_plain(&smuggled), Err(FrameError::MustBeSealed));
+    }
 
     #[test]
     fn a_signature_over_the_binding_context_verifies() {
