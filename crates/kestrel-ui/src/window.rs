@@ -146,27 +146,56 @@ impl Window {
         // Where a call's video goes. Hidden until there is any, so a text
         // client does not permanently reserve a third of its own window.
         let videos = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        // Small enough to be got out of the way, large enough to grab.
+        videos.set_height_request(80);
         videos.set_homogeneous(false);
         videos.set_margin_start(6);
         videos.set_margin_end(6);
         videos.set_margin_top(6);
-        videos.set_height_request(240);
         videos.set_visible(false);
+
+        // What is read and what is watched want different amounts of room at
+        // different moments, and only the person looking knows which. Every
+        // divider is draggable rather than fixed, and each keeps its size when
+        // the window is resized so a deliberate choice is not undone.
+        let chat = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        chat.append(&scroller);
+        chat.append(&entry);
+
+        let body = gtk::Paned::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .start_child(&videos)
+            .end_child(&chat)
+            .resize_start_child(false)
+            .shrink_start_child(false)
+            .resize_end_child(true)
+            .position(260)
+            .build();
 
         let centre = gtk::Box::new(gtk::Orientation::Vertical, 0);
         centre.append(&topic);
-        centre.append(&videos);
         centre.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-        centre.append(&scroller);
-        centre.append(&entry);
+        centre.append(&body);
         centre.set_hexpand(true);
 
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        row.append(&sidebar_pane);
-        row.append(&gtk::Separator::new(gtk::Orientation::Vertical));
-        row.append(&centre);
-        row.append(&gtk::Separator::new(gtk::Orientation::Vertical));
-        row.append(&members_pane);
+        let talking = gtk::Paned::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .start_child(&centre)
+            .end_child(&members_pane)
+            .resize_start_child(true)
+            .resize_end_child(false)
+            .shrink_end_child(false)
+            .build();
+
+        let row = gtk::Paned::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .start_child(&sidebar_pane)
+            .end_child(&talking)
+            .resize_start_child(false)
+            .shrink_start_child(false)
+            .resize_end_child(true)
+            .position(180)
+            .build();
 
         let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
         outer.append(&gtk::PopoverMenuBar::from_model(Some(&menu_model())));
@@ -561,6 +590,7 @@ impl Window {
                 showing.popup();
             });
             widget.add_controller(click);
+            unparent_with(&widget, &menu);
 
             self.sidebar.append(&widget);
             if id == &current {
@@ -624,6 +654,7 @@ impl Window {
                 showing.popup();
             });
             label.add_controller(click);
+            unparent_with(&label, &menu);
 
             self.members.append(&label);
         }
@@ -1026,9 +1057,9 @@ impl Window {
 
         let labelled = gtk::Box::new(gtk::Orientation::Vertical, 2);
         if peer == "you" {
-            // Smaller, and first, so it reads as a corner of the call rather
-            // than another participant.
-            labelled.set_width_request(160);
+            // Placed first, and given less room to begin with, so it reads as
+            // a corner of the call rather than another participant -- but the
+            // divider beside it can be dragged either way.
             labelled.set_hexpand(false);
         }
         labelled.append(&picture);
@@ -1039,11 +1070,7 @@ impl Window {
                 .build(),
         );
 
-        if peer == "you" {
-            self.videos.prepend(&labelled);
-        } else {
-            self.videos.append(&labelled);
-        }
+        self.add_picture(&labelled, peer == "you");
         self.state
             .borrow_mut()
             .pictures
@@ -1061,6 +1088,36 @@ impl Window {
             }
         };
         let _ = self.commands.borrow().send(command);
+    }
+
+    /// Put a picture in the strip, divided from whatever is already there.
+    ///
+    /// Chained rather than laid out side by side, so every picture has a
+    /// handle between it and its neighbour. The whole strip is emptied at the
+    /// end of a call, so the chain never has to be unpicked.
+    fn add_picture(&self, picture: &gtk::Box, mine: bool) {
+        let Some(existing) = self.videos.first_child() else {
+            self.videos.append(picture);
+            return;
+        };
+
+        self.videos.remove(&existing);
+        let (start, end): (&gtk::Widget, &gtk::Widget) = if mine {
+            (picture.upcast_ref(), &existing)
+        } else {
+            (&existing, picture.upcast_ref())
+        };
+
+        let divided = gtk::Paned::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .start_child(start)
+            .end_child(end)
+            .resize_start_child(true)
+            .resize_end_child(true)
+            .build();
+        // Your own picture is the smaller of the two until you say otherwise.
+        divided.set_position(if mine { 200 } else { 360 });
+        self.videos.append(&divided);
     }
 
     /// Take the video away when there is no longer a call.
@@ -1336,6 +1393,16 @@ const ACTIONS: [&str; 18] = [
     "answer",
     "hangup",
 ];
+
+/// Take a popover down when the widget it hangs off goes away.
+///
+/// A popover is parented to a widget but is not one of its children, so it
+/// outlives it unless somebody says otherwise. These lists are rebuilt on
+/// every change, which without this leaves one orphan per row per rebuild.
+fn unparent_with(widget: &impl IsA<gtk::Widget>, menu: &gtk::PopoverMenu) {
+    let menu = menu.clone();
+    widget.connect_destroy(move |_| menu.unparent());
+}
 
 /// Where a pointer landed, as a rectangle a popover can point at.
 ///
