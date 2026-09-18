@@ -428,7 +428,10 @@ mod tests {
         let mut encoded = Vec::new();
         ciborium::into_writer(&description_frame(), &mut encoded).unwrap();
         let smuggled = super::BASE64.encode(&encoded);
-        assert_eq!(super::decode_plain(&smuggled), Err(FrameError::MustBeSealed));
+        assert_eq!(
+            super::decode_plain(&smuggled),
+            Err(FrameError::MustBeSealed)
+        );
     }
 
     #[test]

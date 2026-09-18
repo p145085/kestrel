@@ -17,14 +17,14 @@ async fn main() {
         Source::Test
     };
 
-    let (peer, mut events) = match PeerConnection::new("dump", Sending::audio_video(), &source, None)
-    {
-        Ok(pair) => pair,
-        Err(error) => {
-            println!("COULD NOT BUILD: {error}");
-            return;
-        }
-    };
+    let (peer, mut events) =
+        match PeerConnection::new("dump", Sending::audio_video(), &source, None) {
+            Ok(pair) => pair,
+            Err(error) => {
+                println!("COULD NOT BUILD: {error}");
+                return;
+            }
+        };
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     while tokio::time::Instant::now() < deadline {

@@ -1,0 +1,27 @@
+[package]
+name = "kestrel-ui"
+description = "Kestrel's graphical client."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "kestrel-ui"
+path = "src/main.rs"
+
+[dependencies]
+kestrel-net.workspace = true
+kestrel-proto.workspace = true
+kestrel-session.workspace = true
+gtk.workspace = true
+async-channel.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros"] }
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

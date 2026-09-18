@@ -34,39 +34,58 @@ encrypted in transit but the server can decrypt it. The UI says so.
 
 ## Status
 
-Early development. Nothing is usable yet.
+Early development. Text chat and calls both work; the client is not yet
+something you would daily-drive.
 
 - [x] `kestrel-proto` — sans-io IRC codec: messages, IRCv3 tags, sources, casemapping, numerics
 - [x] `kestrel-proto` shares one codec between client and server, so the wire format cannot drift
 - [x] `kestreld-core` — registration, channels, modes, bans, messaging, queries,
       account registration, and the IRCv3 capabilities a modern client expects
 - [x] `kestreld-services` — accounts, Argon2 password storage, SASL PLAIN and EXTERNAL
-- [~] `kestreld` — the server binary. Runs over plain TCP; **no TLS yet**, and
-      nothing is persisted across restarts
+- [x] `kestreld` — the server binary, over plain TCP or TLS, with accounts
+      persisted across restarts
 - [x] `kestrel-session` — the client's sans-io session: capability
       negotiation, SASL, and tracked channel and member state
 - [x] `kestrel-net` — the client transport, plaintext and TLS
 - [x] `kestrel-cli` — a terminal client. **Works today**
-- [ ] `kestrel-ui` — the GTK client
+- [~] `kestrel-ui` — the GTK client. **Connects, joins and chats**, with a
+      buffer list, member list and topic; calls are not wired into it yet
+- [x] `kestrel-call` — the call state machine: consent, key exchange, mesh
 - [x] `kestrel-crypto` — identity, sealed payloads, short authentication strings
 - [x] `kestrel-rtc-proto` — compact session descriptions and signalling frames
-- [~] `kestrel-media` — GStreamer engine. **Two peers negotiate and exchange
-      real audio and video over SRTP**; not yet wired to the IRC signalling
-- [ ] Calls end to end — every piece exists; nothing joins them up yet
+- [x] `kestrel-media` — GStreamer engine, with camera selection on Windows
+- [x] Calls end to end — **two clients call each other through `kestreld`,
+      with a real camera or with test patterns**
+- [ ] TURN credentials, SFU handoff, and identity that survives a restart
 
-## Building the media engine
+## Building the media engine and the interface
 
-Only needed for `kestrel-media`; the chat client and server build without it.
+Only needed for `kestrel-media` and `kestrel-ui`; the terminal client and the
+server build without either.
 
 ```powershell
 winget install gstreamerproject.gstreamer
 . .\scripts\dev-env.ps1     # sets PKG_CONFIG_PATH and PATH for this shell
-cargo test -p kestrel-media
+cargo test -p kestrel-media -p kestrel-ui
 ```
 
 The winget package bundles GStreamer, the WebRTC plugins, GTK4 and
 `gtk4paintablesink`, so no separate GTK build is needed. On Debian or Ubuntu
 the equivalent packages are listed in `.github/workflows/ci.yml`.
+
+## Trying it
+
+```powershell
+cargo run -p kestreld -- kestreld.toml
+cargo run -p kestrel-ui -- 127.0.0.1:6667 --nick you -j '#test'
+```
+
+For a call, run the terminal client twice and use `/call <nick>`, then
+`/answer`. Both ends print a four-word phrase; say it aloud to check nobody
+is in the middle, and `/verify` once it matches. `--test-media` uses test
+patterns instead of your camera, and `--list-cameras` shows what is
+available -- worth checking, since Windows may rank a paired phone ahead of
+anything plugged in.
 
 **The server works.** You can point HexChat, WeeChat or irssi at it today and
 chat: register, join channels, set modes and topics, kick, ban, and authenticate

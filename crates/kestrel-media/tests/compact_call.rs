@@ -18,8 +18,8 @@ enum Role {
 
 /// Reduce SDP to the compact form and rebuild it, as the wire would.
 fn through_compact(text: &str) -> String {
-    let compact = sdp::from_sdp(text)
-        .unwrap_or_else(|| panic!("could not reduce a description:\n{text}"));
+    let compact =
+        sdp::from_sdp(text).unwrap_or_else(|| panic!("could not reduce a description:\n{text}"));
     sdp::to_sdp(&compact)
 }
 
@@ -143,7 +143,10 @@ async fn a_call_survives_the_compact_form() {
     let to_alice = bytes_received(&alice);
     let to_bob = bytes_received(&bob);
 
-    assert!(to_alice > 0, "alice received nothing through the compact form");
+    assert!(
+        to_alice > 0,
+        "alice received nothing through the compact form"
+    );
     assert!(to_bob > 0, "bob received nothing through the compact form");
 
     // Bytes arriving proves the transport. Decoding them proves the receive

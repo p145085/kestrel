@@ -9,6 +9,7 @@ members = [
     "crates/kestrel-session",
     "crates/kestrel-net",
     "crates/kestrel-cli",
+    "crates/kestrel-ui",
     "crates/kestreld-core",
     "crates/kestreld-services",
     "crates/kestreld",
@@ -30,6 +31,8 @@ kestrel-rtc-proto = { path = "crates/kestrel-rtc-proto" }
 kestrel-session = { path = "crates/kestrel-session" }
 kestrel-media = { path = "crates/kestrel-media" }
 kestrel-net = { path = "crates/kestrel-net" }
+gtk = { package = "gtk4", version = "0.11" }
+async-channel = "2"
 kestreld-core = { path = "crates/kestreld-core" }
 kestreld-services = { path = "crates/kestreld-services" }
 argon2 = { version = "0.5", features = ["std"] }

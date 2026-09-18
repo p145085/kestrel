@@ -86,7 +86,10 @@ fn an_invitation_gathers_nothing_until_it_is_answered() {
         !has_action(&ringing, |a| matches!(a, Action::OpenPeer { .. })),
         "ringing must not open a connection"
     );
-    assert!(signals(&ringing).is_empty(), "ringing must send nothing back");
+    assert!(
+        signals(&ringing).is_empty(),
+        "ringing must send nothing back"
+    );
 }
 
 #[test]
@@ -98,7 +101,10 @@ fn answering_is_what_starts_gathering() {
         .unwrap();
 
     let accept = bob.accept("alice").unwrap();
-    assert!(has_action(&accept, |a| matches!(a, Action::OpenPeer { .. })));
+    assert!(has_action(&accept, |a| matches!(
+        a,
+        Action::OpenPeer { .. }
+    )));
 }
 
 #[test]
@@ -151,7 +157,9 @@ fn a_description_travels_sealed_and_arrives_expanded() {
     assert!(payload.len() < 512, "offer was {} bytes", payload.len());
 
     let received = bob.on_signal("alice", Some("alice"), payload).unwrap();
-    let Some(Action::SetRemoteDescription { kind, sdp: text, .. }) = received
+    let Some(Action::SetRemoteDescription {
+        kind, sdp: text, ..
+    }) = received
         .actions
         .iter()
         .find(|a| matches!(a, Action::SetRemoteDescription { .. }))
@@ -311,7 +319,8 @@ fn ring_from(us: &mut Call, identity: &Identity, peer: &str) -> kestrel_call::Ou
         KnownPeers::new(),
     );
     let invite = them.invite("alice").unwrap();
-    us.on_signal(peer, Some(peer), &signals(&invite)[0]).unwrap();
+    us.on_signal(peer, Some(peer), &signals(&invite)[0])
+        .unwrap();
     us.accept(peer).unwrap()
 }
 
@@ -373,8 +382,13 @@ fn hanging_up_tells_the_peer_and_closes_the_connection() {
     assert!(has_action(&bye, |a| matches!(a, Action::ClosePeer { .. })));
     assert!(!alice.is_active("bob"));
 
-    let received = bob.on_signal("alice", Some("alice"), &signals(&bye)[0]).unwrap();
-    assert!(has_action(&received, |a| matches!(a, Action::ClosePeer { .. })));
+    let received = bob
+        .on_signal("alice", Some("alice"), &signals(&bye)[0])
+        .unwrap();
+    assert!(has_action(&received, |a| matches!(
+        a,
+        Action::ClosePeer { .. }
+    )));
     assert!(matches!(received.events[0], Event::PeerGone { .. }));
     assert!(!bob.is_active("alice"));
 }
@@ -405,7 +419,11 @@ fn a_sealed_frame_before_the_exchange_completes_is_refused() {
     stranger.invite("alice").unwrap();
 
     // Something that looks sealed but was never agreed with us.
-    assert!(alice.on_signal("bob", Some("bob"), "bm90LWEtcmVhbC1mcmFtZQ").is_err());
+    assert!(
+        alice
+            .on_signal("bob", Some("bob"), "bm90LWEtcmVhbC1mcmFtZQ")
+            .is_err()
+    );
 }
 
 #[test]

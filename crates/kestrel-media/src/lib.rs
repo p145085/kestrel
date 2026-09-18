@@ -10,9 +10,7 @@ use std::sync::Once;
 
 use gstreamer as gst;
 
-pub use peer::{
-    ConnectionState, IceState, PeerConnection, PeerEvent, Sending, Source, cameras,
-};
+pub use peer::{ConnectionState, IceState, PeerConnection, PeerEvent, Sending, Source, cameras};
 
 /// Why the media engine could not do something.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

@@ -394,12 +394,8 @@ impl Call {
             } => {
                 // The signature binds this call, both accounts and the
                 // ephemeral key, so it cannot be lifted from another call.
-                let context = binding_context(
-                    &self.id,
-                    peer.as_bytes(),
-                    self.me.as_bytes(),
-                    &ephemeral,
-                );
+                let context =
+                    binding_context(&self.id, peer.as_bytes(), self.me.as_bytes(), &ephemeral);
                 if !identity.verify(&context, &signature) {
                     return Err(CallError::BadSignature);
                 }
@@ -424,12 +420,8 @@ impl Call {
                 ephemeral,
                 signature,
             } => {
-                let context = binding_context(
-                    &self.id,
-                    peer.as_bytes(),
-                    self.me.as_bytes(),
-                    &ephemeral,
-                );
+                let context =
+                    binding_context(&self.id, peer.as_bytes(), self.me.as_bytes(), &ephemeral);
                 if !identity.verify(&context, &signature) {
                     return Err(CallError::BadSignature);
                 }
@@ -500,7 +492,8 @@ impl Call {
                 for candidate in candidates {
                     // Section 0 is audio and 1 is video in everything we
                     // generate; a candidate naming neither is audio.
-                    let mline_index = u32::from(candidate.mid == "1" || candidate.mid.contains("video"));
+                    let mline_index =
+                        u32::from(candidate.mid == "1" || candidate.mid.contains("video"));
                     out.act(Action::AddCandidate {
                         peer: peer.to_owned(),
                         mline_index,
@@ -601,9 +594,10 @@ impl Call {
     pub fn on_media(&mut self, event: MediaEvent) -> Result<Outcome, CallError> {
         let mut out = Outcome::default();
         match event {
-            MediaEvent::LocalDescription { peer, sdp: text, .. } => {
-                let description =
-                    sdp::from_sdp(&text).ok_or(CallError::BadDescription)?;
+            MediaEvent::LocalDescription {
+                peer, sdp: text, ..
+            } => {
+                let description = sdp::from_sdp(&text).ok_or(CallError::BadDescription)?;
                 self.seal_to(&peer, &Frame::Description(description), &mut out)?;
             }
             MediaEvent::LocalCandidate {

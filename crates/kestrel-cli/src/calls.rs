@@ -246,7 +246,9 @@ impl Calls {
         if any {
             status("verified; this key will be remembered");
         } else {
-            warn("nothing to verify: the peer is not logged in, so there is no account to remember a key against");
+            warn(
+                "nothing to verify: the peer is not logged in, so there is no account to remember a key against",
+            );
         }
         Ok(())
     }
@@ -381,7 +383,8 @@ impl Calls {
                 reason,
             },
             PeerEvent::NegotiationNeeded => {
-                self.negotiation_ready.insert((call_id.clone(), peer.clone()));
+                self.negotiation_ready
+                    .insert((call_id.clone(), peer.clone()));
                 self.offer_if_ready(&call_id, &peer);
                 return Ok(());
             }
@@ -464,7 +467,12 @@ impl Calls {
     }
 
     /// Carry out what the state machine decided.
-    fn apply(&mut self, handle: &Handle, call_id: &str, outcome: kestrel_call::Outcome) -> Result<()> {
+    fn apply(
+        &mut self,
+        handle: &Handle,
+        call_id: &str,
+        outcome: kestrel_call::Outcome,
+    ) -> Result<()> {
         for action in outcome.actions {
             match action {
                 Action::Signal { peer, payload } => {
@@ -609,12 +617,9 @@ impl Calls {
     }
 
     fn first_ringing(&self) -> Option<(String, String)> {
-        self.active.iter().find_map(|(id, entry)| {
-            entry
-                .ringing
-                .first()
-                .map(|peer| (id.clone(), peer.clone()))
-        })
+        self.active
+            .iter()
+            .find_map(|(id, entry)| entry.ringing.first().map(|peer| (id.clone(), peer.clone())))
     }
 
     fn call_of(&self, peer: &str) -> Option<String> {

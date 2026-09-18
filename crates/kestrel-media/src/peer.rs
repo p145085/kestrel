@@ -618,10 +618,7 @@ fn watch_bus(pipeline: &gst::Pipeline, events: &mpsc::UnboundedSender<PeerEvent>
                     || "pipeline".to_owned(),
                     |src| src.path_string().to_string(),
                 );
-                let detail = error
-                    .debug()
-                    .map(|d| format!(" ({d})"))
-                    .unwrap_or_default();
+                let detail = error.debug().map(|d| format!(" ({d})")).unwrap_or_default();
                 let _ = tx.send(PeerEvent::Error(format!(
                     "{source}: {}{detail}",
                     error.error()
@@ -673,7 +670,10 @@ fn video_devices() -> Vec<gst::Device> {
     for device in found {
         let rank = backend_rank(&device);
         let name = device.display_name();
-        match best.iter().position(|(_, kept)| kept.display_name() == name) {
+        match best
+            .iter()
+            .position(|(_, kept)| kept.display_name() == name)
+        {
             Some(at) if rank < best[at].0 => best[at] = (rank, device),
             Some(_) => {}
             None => best.push((rank, device)),
