@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/kestrel-crypto",
+    "crates/kestrel-media",
     "crates/kestrel-proto",
     "crates/kestrel-rtc-proto",
     "crates/kestrel-session",

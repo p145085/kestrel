@@ -9,3 +9,6 @@ Cargo.lock.bak
 # Local server config; kestreld.example.toml is the committed template.
 /kestreld.toml
 /data/
+
+# Local, machine-specific build settings.
+/.cargo/

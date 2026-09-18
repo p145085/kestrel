@@ -1,0 +1,23 @@
+[package]
+name = "kestrel-media"
+description = "GStreamer media engine for Kestrel calls."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+gstreamer = "0.24"
+gstreamer-webrtc = "0.24"
+gstreamer-sdp = "0.24"
+tokio = { workspace = true, features = ["sync"] }
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }
+
+[lints]
+workspace = true

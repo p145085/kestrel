@@ -50,9 +50,23 @@ Early development. Nothing is usable yet.
 - [ ] `kestrel-ui` — the GTK client
 - [x] `kestrel-crypto` — identity, sealed payloads, short authentication strings
 - [x] `kestrel-rtc-proto` — compact session descriptions and signalling frames
-- [~] Calls — the [specification](spec/rtc-over-irc.md), the server's `CALL`
-      command family, and the whole payload layer are done. **Media is not**:
-      nothing yet captures, encodes or plays audio or video
+- [~] `kestrel-media` — GStreamer engine. **Two peers negotiate and exchange
+      real audio and video over SRTP**; not yet wired to the IRC signalling
+- [ ] Calls end to end — every piece exists; nothing joins them up yet
+
+## Building the media engine
+
+Only needed for `kestrel-media`; the chat client and server build without it.
+
+```powershell
+winget install gstreamerproject.gstreamer
+. .\scripts\dev-env.ps1     # sets PKG_CONFIG_PATH and PATH for this shell
+cargo test -p kestrel-media
+```
+
+The winget package bundles GStreamer, the WebRTC plugins, GTK4 and
+`gtk4paintablesink`, so no separate GTK build is needed. On Debian or Ubuntu
+the equivalent packages are listed in `.github/workflows/ci.yml`.
 
 **The server works.** You can point HexChat, WeeChat or irssi at it today and
 chat: register, join channels, set modes and topics, kick, ban, and authenticate
