@@ -9,6 +9,7 @@
 use std::collections::{HashMap, HashSet};
 
 use kestrel_proto::{Message, MessageBuf, numeric};
+use kestreld_services::AccountStore;
 
 use crate::channel::Channel;
 use crate::client::{Client, ClientId, RegistrationState};
@@ -49,6 +50,7 @@ pub struct Server {
     next_id: u64,
     created_at: u64,
     max_local_users: usize,
+    accounts: AccountStore,
 }
 
 impl Server {
@@ -63,6 +65,28 @@ impl Server {
             next_id: 1,
             created_at: now,
             max_local_users: 0,
+            accounts: AccountStore::new(),
+        }
+    }
+
+    /// The account store.
+    #[must_use]
+    pub fn accounts(&self) -> &AccountStore {
+        &self.accounts
+    }
+
+    /// The account store, mutably, for registration and loading from disk.
+    pub fn accounts_mut(&mut self) -> &mut AccountStore {
+        &mut self.accounts
+    }
+
+    /// Record the fingerprint of a client's TLS certificate.
+    ///
+    /// The transport supplies this; a client can never set its own, which is
+    /// the whole basis of authenticating by certificate.
+    pub fn set_certificate_fingerprint(&mut self, id: ClientId, fingerprint: String) {
+        if let Some(client) = self.clients.get_mut(&id) {
+            client.certificate_fingerprint = Some(fingerprint);
         }
     }
 
@@ -298,7 +322,15 @@ impl Server {
         // channel or messaging state.
         let pre_registration = matches!(
             command.as_slice(),
-            b"CAP" | b"PASS" | b"NICK" | b"USER" | b"QUIT" | b"PING" | b"PONG" | b"ERROR"
+            b"CAP"
+                | b"PASS"
+                | b"AUTHENTICATE"
+                | b"NICK"
+                | b"USER"
+                | b"QUIT"
+                | b"PING"
+                | b"PONG"
+                | b"ERROR"
         );
 
         let registered = self.clients[&id].is_registered();
@@ -314,6 +346,7 @@ impl Server {
         match command.as_slice() {
             b"CAP" => self.cmd_cap(id, msg, now, out),
             b"PASS" => self.cmd_pass(id, msg, out),
+            b"AUTHENTICATE" => self.cmd_authenticate(id, msg, out),
             b"NICK" => self.cmd_nick(id, msg, now, out),
             b"USER" => self.cmd_user(id, msg, now, out),
             b"PING" => self.cmd_ping(id, msg, out),

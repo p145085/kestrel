@@ -2,6 +2,8 @@
 
 use std::collections::HashSet;
 
+use kestreld_services::SaslSession;
+
 /// Identifies one connected client for the lifetime of the server process.
 ///
 /// Ids are never reused, so a stale id from a disconnected client resolves to
@@ -50,6 +52,14 @@ pub struct Client {
     pub(crate) channels: HashSet<Vec<u8>>,
     /// Away message, if the client is marked away.
     pub(crate) away: Option<Vec<u8>>,
+    /// Capabilities the client has successfully requested.
+    pub(crate) caps: HashSet<String>,
+    /// In-progress SASL exchange.
+    pub(crate) sasl: SaslSession,
+    /// Services account this client has authenticated as.
+    pub(crate) account: Option<Vec<u8>>,
+    /// Fingerprint of the client's TLS certificate, supplied by the transport.
+    pub(crate) certificate_fingerprint: Option<String>,
 }
 
 impl Client {
@@ -65,6 +75,10 @@ impl Client {
             cap_negotiating: false,
             channels: HashSet::new(),
             away: None,
+            caps: HashSet::new(),
+            sasl: SaslSession::new(),
+            account: None,
+            certificate_fingerprint: None,
         }
     }
 
@@ -123,6 +137,36 @@ impl Client {
     #[must_use]
     pub fn channels(&self) -> &HashSet<Vec<u8>> {
         &self.channels
+    }
+
+    /// Whether the client has enabled a capability.
+    #[must_use]
+    pub fn has_cap(&self, name: &str) -> bool {
+        self.caps.contains(name)
+    }
+
+    /// Capabilities the client has enabled.
+    #[must_use]
+    pub fn caps(&self) -> &HashSet<String> {
+        &self.caps
+    }
+
+    /// The services account this client authenticated as, if any.
+    #[must_use]
+    pub fn account(&self) -> Option<&[u8]> {
+        self.account.as_deref()
+    }
+
+    /// Whether the client completed SASL authentication.
+    #[must_use]
+    pub fn is_authenticated(&self) -> bool {
+        self.account.is_some()
+    }
+
+    /// The fingerprint of the client's TLS certificate, if it presented one.
+    #[must_use]
+    pub fn certificate_fingerprint(&self) -> Option<&str> {
+        self.certificate_fingerprint.as_deref()
     }
 
     /// The full `nick!user@host` mask, used as the source of messages this

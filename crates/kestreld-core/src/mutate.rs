@@ -213,6 +213,30 @@ impl Server {
         true
     }
 
+    /// Record the account a client authenticated as.
+    pub(crate) fn set_account(&mut self, id: ClientId, account: Option<Vec<u8>>) {
+        if let Some(client) = self.clients_mut().get_mut(&id) {
+            if account.is_some() {
+                client.sasl.mark_authenticated();
+            }
+            client.account = account;
+        }
+    }
+
+    /// Enable a capability for a client.
+    pub(crate) fn enable_cap(&mut self, id: ClientId, name: &str) {
+        if let Some(client) = self.clients_mut().get_mut(&id) {
+            client.caps.insert(name.to_owned());
+        }
+    }
+
+    /// Disable a capability for a client.
+    pub(crate) fn disable_cap(&mut self, id: ClientId, name: &str) {
+        if let Some(client) = self.clients_mut().get_mut(&id) {
+            client.caps.remove(name);
+        }
+    }
+
     /// Record an outstanding invitation.
     pub(crate) fn record_invite(&mut self, folded: &[u8], target: ClientId) {
         if let Some(channel) = self.channels_mut().get_mut(folded) {

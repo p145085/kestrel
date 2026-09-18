@@ -37,8 +37,8 @@ encrypted in transit but the server can decrypt it. The UI says so.
 Early development. Nothing is usable yet.
 
 - [x] `kestrel-proto` — sans-io IRC codec: messages, IRCv3 tags, sources, casemapping, numerics
-- [~] `kestreld-core` — server state machine: registration, channels, messaging, topics
-- [ ] `kestreld-services` — accounts and SASL
+- [~] `kestreld-core` — server state machine: registration, channels, modes, messaging, queries
+- [x] `kestreld-services` — accounts, Argon2 password storage, SASL PLAIN and EXTERNAL
 - [ ] `kestreld` — the server binary: TLS, sockets, persistence
 - [ ] `kestrel` — the client
 - [ ] Calls

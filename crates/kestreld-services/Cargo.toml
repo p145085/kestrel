@@ -1,6 +1,6 @@
 [package]
-name = "kestreld-core"
-description = "Sans-io IRC server state machine: clients, registration, channels and routing."
+name = "kestreld-services"
+description = "Accounts, password storage and SASL authentication for kestreld."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,12 +9,11 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-kestrel-proto.workspace = true
-kestreld-services.workspace = true
-thiserror.workspace = true
-
-[dev-dependencies]
+argon2.workspace = true
+rand_core.workspace = true
 base64.workspace = true
+thiserror.workspace = true
+subtle.workspace = true
 
 [lints]
 workspace = true

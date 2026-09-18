@@ -6,9 +6,28 @@ use crate::client::ClientId;
 use crate::datetime::format_utc;
 use crate::server::{Action, Server};
 
-/// Capabilities this server offers. Empty for now; the IRCv3 set and the
-/// call capability land with the crates that implement them.
-const SUPPORTED_CAPS: &[&str] = &[];
+/// Capabilities this server offers, as `name` or `name=value`.
+///
+/// The rest of the IRCv3 set, and the call capability, land with the crates
+/// that implement them. Advertising a capability we do not honour is worse
+/// than advertising none: a client that enables it changes its own behaviour
+/// and then waits for messages that never arrive.
+fn supported_caps() -> Vec<String> {
+    vec![format!(
+        "sasl={}",
+        kestreld_services::Mechanism::advertised()
+    )]
+}
+
+/// The bare name of a capability token, dropping any `=value`.
+fn cap_name(token: &str) -> &str {
+    token.split('=').next().unwrap_or(token)
+}
+
+/// Whether `name` is a capability this server offers.
+fn is_supported(name: &str) -> bool {
+    supported_caps().iter().any(|token| cap_name(token) == name)
+}
 
 impl Server {
     pub(crate) fn cmd_cap(
@@ -46,32 +65,28 @@ impl Server {
                         .source(self.server_name())
                         .param(target)
                         .param("LS")
-                        .trailing(SUPPORTED_CAPS.join(" ")),
+                        .trailing(supported_caps().join(" ")),
                 });
             }
             b"LIST" => {
+                let mut enabled: Vec<String> = self
+                    .client(id)
+                    .map(|c| c.caps().iter().cloned().collect())
+                    .unwrap_or_default();
+                enabled.sort();
                 out.push(Action::Send {
                     to: id,
                     message: MessageBuf::new("CAP")
                         .source(self.server_name())
                         .param(target)
                         .param("LIST")
-                        .trailing(""),
+                        .trailing(enabled.join(" ")),
                 });
             }
             b"REQ" => {
-                // Nothing is on offer yet, so every request is refused. NAK
-                // echoes the request verbatim, as the specification requires.
                 let requested = msg.param(1).unwrap_or(b"").to_vec();
                 self.set_cap_negotiating(id, true);
-                out.push(Action::Send {
-                    to: id,
-                    message: MessageBuf::new("CAP")
-                        .source(self.server_name())
-                        .param(target)
-                        .param("NAK")
-                        .trailing(requested),
-                });
+                self.handle_cap_req(id, &target, &requested, out);
             }
             b"END" => {
                 self.set_cap_negotiating(id, false);
@@ -89,6 +104,49 @@ impl Server {
                 });
             }
         }
+    }
+
+    /// Handle `CAP REQ`.
+    ///
+    /// A request is all-or-nothing: if any capability in the list is refused,
+    /// none are enabled. Partially applying a request would leave the client
+    /// and server disagreeing about which are active.
+    fn handle_cap_req(
+        &mut self,
+        id: ClientId,
+        target: &[u8],
+        requested: &[u8],
+        out: &mut Vec<Action>,
+    ) {
+        let text = String::from_utf8_lossy(requested).into_owned();
+        let tokens: Vec<&str> = text.split_whitespace().collect();
+
+        let all_known = !tokens.is_empty()
+            && tokens
+                .iter()
+                .all(|token| is_supported(token.trim_start_matches('-')));
+
+        let verb = if all_known { "ACK" } else { "NAK" };
+        if all_known {
+            for token in &tokens {
+                if let Some(name) = token.strip_prefix('-') {
+                    self.disable_cap(id, name);
+                } else {
+                    self.enable_cap(id, token);
+                }
+            }
+        }
+
+        // ACK and NAK both echo the request verbatim, so the client can match
+        // the reply to what it asked for.
+        out.push(Action::Send {
+            to: id,
+            message: MessageBuf::new("CAP")
+                .source(self.server_name())
+                .param(target.to_vec())
+                .param(verb)
+                .trailing(requested.to_vec()),
+        });
     }
 
     pub(crate) fn cmd_pass(&mut self, id: ClientId, msg: &Message<'_>, out: &mut Vec<Action>) {

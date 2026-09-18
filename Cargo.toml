@@ -1,6 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["crates/kestrel-proto", "crates/kestreld-core"]
+members = [
+    "crates/kestrel-proto",
+    "crates/kestreld-core",
+    "crates/kestreld-services",
+]
 
 [workspace.package]
 version = "0.0.1"
@@ -12,6 +16,13 @@ authors = ["Kestrel contributors"]
 
 [workspace.dependencies]
 kestrel-proto = { path = "crates/kestrel-proto" }
+kestreld-core = { path = "crates/kestreld-core" }
+kestreld-services = { path = "crates/kestreld-services" }
+argon2 = { version = "0.5", features = ["std"] }
+# OsRng lives behind rand_core's getrandom feature, which argon2 does not enable.
+rand_core = { version = "0.6", features = ["getrandom"] }
+base64 = "0.22"
+subtle = "2.6"
 memchr = "2.7"
 thiserror = "2"
 smallvec = { version = "1.13", features = ["union", "const_generics"] }
