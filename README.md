@@ -131,6 +131,9 @@ in.
 Video is drawn by a sink the window builds and hands to the media engine:
 a `gdk::Paintable` cannot leave the thread that made it, but the element
 wrapped around it can, so the element crosses and the widget never does.
+Your own camera appears beside the call, branched off before the encoder
+rather than opened a second time -- a capture device opens once, and a
+preview that opened it again would take it from the call.
 
 To watch what the window is doing without opening one:
 

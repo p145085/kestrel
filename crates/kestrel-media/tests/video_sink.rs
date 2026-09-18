@@ -100,6 +100,29 @@ async fn pump(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn our_own_camera_can_be_watched_without_a_call() {
+    // A preview is worth having before anybody answers, and it must not need
+    // a second look at the camera: a device opens once, so the picture shown
+    // is the one already being prepared for sending.
+    kestrel_media::init().expect("GStreamer should initialise");
+
+    let (peer, _events) =
+        PeerConnection::new("alone", Sending::audio_video(), &Source::Test, None).unwrap();
+
+    let (sink, frames) = counting_sink();
+    peer.set_self_view_sink(sink)
+        .expect("a self view should be accepted");
+
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        frames.load(Ordering::Relaxed) > 0,
+        "nothing reached the self view"
+    );
+
+    peer.close();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_sink_offered_before_the_call_is_given_the_frames() {
     kestrel_media::init().expect("GStreamer should initialise");
     let sending = Sending::audio_video();

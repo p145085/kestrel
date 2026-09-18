@@ -158,6 +158,11 @@ async fn main() {
                         sink,
                     });
                 }
+                if matches!(event, AppEvent::SelfViewWanted) {
+                    let (sink, frames) = counting_sink();
+                    drawing.push(("you".to_owned(), frames));
+                    let _ = commands_tx.send(UiCommand::SelfViewSink { sink });
+                }
 
                 if matches!(event, AppEvent::Disconnected { .. }) {
                     break;

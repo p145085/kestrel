@@ -139,7 +139,7 @@ impl Window {
         // Where a call's video goes. Hidden until there is any, so a text
         // client does not permanently reserve a third of its own window.
         let videos = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        videos.set_homogeneous(true);
+        videos.set_homogeneous(false);
         videos.set_margin_start(6);
         videos.set_margin_end(6);
         videos.set_margin_top(6);
@@ -297,6 +297,7 @@ impl Window {
                 }
                 self.update_actions();
             }
+            AppEvent::SelfViewWanted => self.show_video("you"),
             AppEvent::VideoWanted { peer } => self.show_video(&peer),
             AppEvent::Disconnected { reason } => {
                 self.state.borrow_mut().connected = false;
@@ -851,6 +852,12 @@ impl Window {
             .build();
 
         let labelled = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        if peer == "you" {
+            // Smaller, and first, so it reads as a corner of the call rather
+            // than another participant.
+            labelled.set_width_request(160);
+            labelled.set_hexpand(false);
+        }
         labelled.append(&picture);
         labelled.append(
             &gtk::Label::builder()
@@ -859,13 +866,24 @@ impl Window {
                 .build(),
         );
 
-        self.videos.append(&labelled);
+        if peer == "you" {
+            self.videos.prepend(&labelled);
+        } else {
+            self.videos.append(&labelled);
+        }
         self.videos.set_visible(true);
 
-        let _ = self.commands.borrow().send(UiCommand::VideoSink {
-            peer: peer.to_owned(),
-            sink,
-        });
+        // "you" is not a nickname anybody can have, so it cannot collide
+        // with a peer of that name.
+        let command = if peer == "you" {
+            UiCommand::SelfViewSink { sink }
+        } else {
+            UiCommand::VideoSink {
+                peer: peer.to_owned(),
+                sink,
+            }
+        };
+        let _ = self.commands.borrow().send(command);
     }
 
     /// Take the video away when there is no longer a call.

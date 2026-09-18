@@ -67,6 +67,8 @@ pub struct Calls {
     notices: Vec<Notice>,
     /// Peers whose video has nowhere to go yet.
     video_wanted: Vec<String>,
+    /// Whether our own picture still needs somewhere to go.
+    self_view_wanted: bool,
 }
 
 struct ActiveCall {
@@ -127,6 +129,7 @@ impl Calls {
             media_tx,
             notices: Vec::new(),
             video_wanted: Vec::new(),
+            self_view_wanted: false,
         }
     }
 
@@ -138,6 +141,25 @@ impl Calls {
     /// and the element comes back.
     pub fn take_video_wanted(&mut self) -> Vec<String> {
         std::mem::take(&mut self.video_wanted)
+    }
+
+    /// Whether our own picture is waiting for somewhere to be drawn.
+    ///
+    /// Asked once per call rather than once per peer: there is one
+    /// camera, so there is one picture of it to show.
+    pub fn take_self_view_wanted(&mut self) -> bool {
+        std::mem::take(&mut self.self_view_wanted)
+    }
+
+    /// Draw our own camera into this sink.
+    pub fn attach_self_view(&mut self, sink: kestrel_media::gstreamer::Element) -> Result<()> {
+        // Any connection will do: they all opened the same camera, and
+        // the preview branches off before anything peer-specific.
+        let Some(connection) = self.connections.values().next() else {
+            bail!("there is no call to show yourself in");
+        };
+        connection.set_self_view_sink(sink)?;
+        Ok(())
     }
 
     /// Draw a peer's video into this sink.
@@ -765,6 +787,7 @@ impl Calls {
                     // a sink handed over early is simply held, and one handed
                     // over late means frames with nowhere to go in between.
                     self.video_wanted.push(peer.to_owned());
+                    self.self_view_wanted = true;
                 }
             }
             Err(error) => self.warn(format!("could not open the microphone or camera: {error}")),

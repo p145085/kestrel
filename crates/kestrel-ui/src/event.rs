@@ -180,6 +180,11 @@ pub enum AppEvent {
         /// Whose video.
         peer: String,
     },
+    /// Our own camera needs somewhere to be drawn.
+    ///
+    /// Answered with [`UiCommand::SelfViewSink`], for the same reason as
+    /// [`AppEvent::VideoWanted`].
+    SelfViewWanted,
     /// The connection ended.
     Disconnected {
         /// Why.
@@ -217,6 +222,11 @@ pub enum UiCommand {
     },
     /// Do something with a call.
     Call(CallAction),
+    /// Draw our own camera into this sink.
+    SelfViewSink {
+        /// Where to draw it.
+        sink: kestrel_media::gstreamer::Element,
+    },
     /// Draw this peer's video into this sink.
     ///
     /// The element crosses threads; the widget it draws into does not.

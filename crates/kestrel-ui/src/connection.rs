@@ -158,6 +158,9 @@ impl State {
                 .await;
         }
 
+        if self.calls.take_self_view_wanted() {
+            let _ = events.send(AppEvent::SelfViewWanted).await;
+        }
         for peer in self.calls.take_video_wanted() {
             let _ = events.send(AppEvent::VideoWanted { peer }).await;
         }
@@ -261,6 +264,12 @@ impl State {
                     show(events, Line::error(error.to_string())).await;
                 }
                 self.flush(events).await;
+                None
+            }
+            UiCommand::SelfViewSink { sink } => {
+                if let Err(error) = self.calls.attach_self_view(sink) {
+                    show(events, Line::error(error.to_string())).await;
+                }
                 None
             }
             UiCommand::VideoSink { peer, sink } => {

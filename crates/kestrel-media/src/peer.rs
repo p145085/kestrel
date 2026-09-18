@@ -240,6 +240,8 @@ pub struct PeerConnection {
     gate: Gate,
     /// Where incoming video is drawn.
     video: VideoSlot,
+    /// Where our own camera is drawn.
+    self_view: VideoSlot,
     /// When the pipeline started playing.
     opened: std::time::Instant,
 }
@@ -282,8 +284,9 @@ impl PeerConnection {
         if sending.audio {
             add_audio(&pipeline, &webrtc, source)?;
         }
+        let self_view = VideoSlot::default();
         if sending.video {
-            add_video(&pipeline, &webrtc, source)?;
+            add_video(&pipeline, &webrtc, source, &self_view)?;
         }
 
         let (events, receiver) = mpsc::unbounded_channel();
@@ -303,6 +306,7 @@ impl PeerConnection {
                 events,
                 gate,
                 video,
+                self_view,
                 opened: std::time::Instant::now(),
             },
             receiver,
@@ -316,7 +320,12 @@ impl PeerConnection {
     /// a thread boundary. Safe to call at any point: before the stream exists
     /// it is held, and afterwards it replaces whatever is drawing.
     pub fn set_video_sink(&self, sink: gst::Element) -> Result<(), MediaError> {
-        let Ok(mut slot) = self.video.0.lock() else {
+        self.replace_in(&self.video, sink)
+    }
+
+    /// Put a sink into one of this connection's video slots.
+    fn replace_in(&self, slot: &VideoSlot, sink: gst::Element) -> Result<(), MediaError> {
+        let Ok(mut slot) = slot.0.lock() else {
             return Err(MediaError::Pipeline("the video slot is poisoned".into()));
         };
 
@@ -355,6 +364,16 @@ impl PeerConnection {
 
         live.sink = sink;
         Ok(())
+    }
+
+    /// Draw what our own camera is seeing into the given sink.
+    ///
+    /// Branches off before the encoder, so what is shown is the picture being
+    /// sent rather than a second look at the camera: a device can only be
+    /// opened once, and a preview that opened it again would take the call's
+    /// camera away from it.
+    pub fn set_self_view_sink(&self, sink: gst::Element) -> Result<(), MediaError> {
+        self.replace_in(&self.self_view, sink)
     }
 
     /// Ask for an offer. The result arrives as [`PeerEvent::LocalDescription`].
@@ -929,6 +948,7 @@ fn add_video(
     pipeline: &gst::Pipeline,
     webrtc: &gst::Element,
     source: &Source,
+    self_view: &VideoSlot,
 ) -> Result<(), MediaError> {
     let src = match source {
         Source::Test => gst::ElementFactory::make("videotestsrc")
@@ -997,15 +1017,78 @@ fn add_video(
         .build()
         .map_err(|_| MediaError::MissingElement("rtpvp8pay"))?;
 
-    let chain = [&src, &raw, &convert, &scale, &size, &queue, &encode, &pay];
+    // Split before the encoder so the preview shows the picture being sent.
+    // Looking at the camera a second time is not an option: a device opens
+    // once, and a preview that opened it again would take it from the call.
+    let tee = make("tee")?;
+
+    let head = [&src, &raw, &convert, &scale, &size, &tee];
+    let encoding = [&queue, &encode, &pay];
     pipeline
-        .add_many(chain)
+        .add_many(head)
         .map_err(|_| MediaError::Pipeline("could not add the video chain".into()))?;
-    gst::Element::link_many(chain)
+    pipeline
+        .add_many(encoding)
+        .map_err(|_| MediaError::Pipeline("could not add the encoder".into()))?;
+    gst::Element::link_many(head)
         .map_err(|_| MediaError::Pipeline("could not link the video chain".into()))?;
+    gst::Element::link_many(encoding)
+        .map_err(|_| MediaError::Pipeline("could not link the encoder".into()))?;
+
+    link_tee(&tee, &queue)?;
     pay.link(webrtc)
         .map_err(|_| MediaError::Pipeline("could not link video to webrtcbin".into()))?;
+
+    // The preview branch, ending nowhere until somebody says where. Built
+    // whether or not it will ever be looked at, because adding a tee branch to
+    // a running pipeline is far more delicate than leaving one idling.
+    match add_preview_branch(pipeline, &tee) {
+        Ok((convert, sink)) => self_view.now_live(convert, sink),
+        // A call without a preview is worth having; a call that would not
+        // start because of one is not.
+        Err(error) => warn!("no self view: {error}"),
+    }
     Ok(())
+}
+
+/// Attach a branch of a tee to an element.
+fn link_tee(tee: &gst::Element, to: &gst::Element) -> Result<(), MediaError> {
+    let source = tee
+        .request_pad_simple("src_%u")
+        .ok_or(MediaError::Pipeline("the tee has no spare branch".into()))?;
+    let target = to.static_pad("sink").ok_or(MediaError::Pipeline(
+        "nothing to attach the branch to".into(),
+    ))?;
+    source
+        .link(&target)
+        .map_err(|_| MediaError::Pipeline("could not attach a tee branch".into()))?;
+    Ok(())
+}
+
+/// Build the branch that shows our own camera, ending in a discard sink.
+///
+/// Returns the converter and the sink, which is where a real one is later
+/// plugged in: the same cut used for an incoming stream.
+fn add_preview_branch(
+    pipeline: &gst::Pipeline,
+    tee: &gst::Element,
+) -> Result<(gst::Element, gst::Element), MediaError> {
+    let queue = make("queue")?;
+    let convert = make("videoconvert")?;
+    let sink = gst::ElementFactory::make("fakesink")
+        .property("sync", false)
+        .build()
+        .map_err(|_| MediaError::MissingElement("fakesink"))?;
+
+    let branch = [&queue, &convert, &sink];
+    pipeline
+        .add_many(branch)
+        .map_err(|_| MediaError::Pipeline("could not add the preview branch".into()))?;
+    gst::Element::link_many(branch)
+        .map_err(|_| MediaError::Pipeline("could not link the preview branch".into()))?;
+    link_tee(tee, &queue)?;
+
+    Ok((convert, sink))
 }
 
 fn make(factory: &'static str) -> Result<gst::Element, MediaError> {
