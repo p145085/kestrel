@@ -36,10 +36,14 @@ encrypted in transit but the server can decrypt it. The UI says so.
 
 Early development. Nothing is usable yet.
 
-- [x] `kestrel-proto` — sans-io IRC codec: messages, IRCv3 tags, sources, length budgets
-- [ ] `kestreld` — the server
+- [x] `kestrel-proto` — sans-io IRC codec: messages, IRCv3 tags, sources, casemapping, numerics
+- [~] `kestreld-core` — server state machine: registration, channels, messaging, topics
+- [ ] `kestreld-services` — accounts and SASL
+- [ ] `kestreld` — the server binary: TLS, sockets, persistence
 - [ ] `kestrel` — the client
 - [ ] Calls
+
+Nothing listens on a socket yet, so there is still nothing to connect to.
 
 ## Building
 

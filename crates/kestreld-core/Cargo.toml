@@ -1,0 +1,16 @@
+[package]
+name = "kestreld-core"
+description = "Sans-io IRC server state machine: clients, registration, channels and routing."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+kestrel-proto.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
